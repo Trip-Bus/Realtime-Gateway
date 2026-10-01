@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: realtime-gateway
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+
+server:
+  port: 16007
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: realtime-gateway
+
+tripbus:
+  realtime:
+    jwks-uri: ${IDENTITY_JWKS_URI:http://localhost:16001/.well-known/jwks.json}
+    events-stream: ${EVENTS_STREAM:tripbus:events}
+    allowed-origins: ${WS_ALLOWED_ORIGINS:*}
+    heartbeat-interval: 20s
+    heartbeat-interval-ms: 20000
+    heartbeat-timeout: 45s
+    auth-timeout: 10s
+    max-subscriptions: 20
+    # Snapshots iniciales (lectura de los servicios dueños del dato).
+    seat-inventory-url: ${SEAT_INVENTORY_URL:http://localhost:16003}
+    flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:16006}
+    fleet-url: ${FLEET_URL:http://localhost:16005}
+    # URL pública del API Gateway que usa la página de demostración.
+    public-api-url: ${PUBLIC_API_URL:http://localhost:8080}

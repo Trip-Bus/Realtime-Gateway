@@ -1,0 +1,90 @@
+# Despliegue en Kubernetes de realtime-gateway (namespace tripbus).
+# Requiere los recursos compartidos de API-gateway/k8s/infra (ConfigMap, Secret, PostgreSQL, Redis).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: realtime-gateway
+  namespace: tripbus
+  labels:
+    app: realtime-gateway
+    app.kubernetes.io/part-of: tripbus
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: realtime-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: realtime-gateway
+        app.kubernetes.io/part-of: tripbus
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /actuator/prometheus
+        prometheus.io/port: "16007"
+    spec:
+      containers:
+        - name: realtime-gateway
+          image: ghcr.io/trip-bus/realtime-gateway:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 16007
+              name: http
+          envFrom:
+            - configMapRef:
+                name: tripbus-config
+            - secretRef:
+                name: tripbus-secrets
+          env:
+            - name: PUBLIC_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: tripbus-config
+                  key: PUBLIC_API_URL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              memory: 640Mi
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: realtime-gateway
+  namespace: tripbus
+  labels:
+    app: realtime-gateway
+spec:
+  # Los clientes se conectan directo por WebSocket. Con varias réplicas no hace falta
+  # afinidad: cada réplica recibe TODOS los eventos del stream y difunde a sus conexiones.
+  type: LoadBalancer
+  selector:
+    app: realtime-gateway
+  ports:
+    - name: http
+      port: 16007
+      targetPort: http

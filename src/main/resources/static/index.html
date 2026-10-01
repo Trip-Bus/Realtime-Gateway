@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TripBus · Demo MVP</title>
+<style>
+  :root {
+    --bg: #f5f4ef; --panel: #ffffff; --ink: #1d2327; --muted: #69737a; --line: #e2e0d8;
+    --accent: #1f6f5c; --accent-ink: #ffffff; --warn: #b5651d; --danger: #b3261e;
+    --free: #dfeee6; --held: #f6d9a8; --sold: #c9cdd1; --offer: #e8d5f5; --mine: #1f6f5c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
+  header small { color: var(--muted); }
+  main { display: grid; grid-template-columns: 340px 1fr 320px; gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 10px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, select { width: 100%; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; font: inherit; background: #fff; }
+  button { padding: 8px 12px; border-radius: 7px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); font: inherit; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex: 1; }
+  .muted { color: var(--muted); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--offer); }
+  .trip { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-top: 8px; cursor: pointer; }
+  .trip:hover, .trip.sel { border-color: var(--accent); }
+  .trip b { font-size: 15px; }
+  .bus { display: inline-grid; gap: 5px; padding: 12px; border: 2px solid var(--line); border-radius: 18px 18px 8px 8px; background: #fbfbf8; margin: 6px 12px 6px 0; vertical-align: top; }
+  .cell { width: 38px; height: 34px; border-radius: 7px; display: grid; place-items: center; font-size: 12px; user-select: none; }
+  .ASIENTO { border: 1px solid #b9c5be; cursor: pointer; }
+  .DISPONIBLE { background: var(--free); }
+  .RETENIDO { background: var(--held); cursor: not-allowed; }
+  .VENDIDO { background: var(--sold); color: #6b7277; cursor: not-allowed; }
+  .EN_OFERTA { background: var(--offer); }
+  .propio { background: var(--mine); color: #fff; }
+  .PASILLO, .VACIO { background: transparent; }
+  .BANO, .CONDUCTOR, .ESCALERA, .PUERTA { background: #eceae3; color: var(--muted); font-size: 10px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; margin-right: 12px; font-size: 12px; }
+  .legend i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
+  #log { height: 420px; overflow: auto; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; background: #fbfbf8; border: 1px solid var(--line); border-radius: 7px; padding: 8px; }
+  #log div { border-bottom: 1px dashed var(--line); padding: 3px 0; }
+  .status { font-weight: 600; }
+  .ok { color: var(--accent); } .err { color: var(--danger); } .warn { color: var(--warn); }
+  #countdown { font-size: 22px; font-weight: 700; color: var(--warn); }
+  img.qr { width: 200px; height: 200px; image-rendering: pixelated; border: 1px solid var(--line); border-radius: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <div><h1>TripBus · Demo del MVP</h1><small>Cliente de prueba: API Gateway (REST) + Realtime Gateway (WebSocket)</small></div>
+  <div class="row" style="flex:0 0 auto"><span id="wsState" class="status muted">WebSocket: desconectado</span></div>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>1 · Sesión</h2>
+      <label>Correo</label><input id="email" value="pasajero@tripbus.co">
+      <label>Contraseña</label><input id="password" type="password" value="TripBus2026">
+      <div class="row" style="margin-top:10px">
+        <button id="btnLogin">Iniciar sesión</button>
+        <button id="btnLogout" class="ghost" disabled>Cerrar sesión</button>
+      </div>
+      <p class="muted" style="margin:8px 0 0">Demo: pasajero@ · operador@ · conductor@ · admin@tripbus.co</p>
+      <p id="who" class="status"></p>
+    </section>
+    <section>
+      <h2>2 · Buscar viaje</h2>
+      <label>Origen</label><select id="origin"></select>
+      <label>Destino</label><select id="destination"></select>
+      <label>Fecha</label><input id="date" type="date">
+      <div style="margin-top:10px"><button id="btnSearch">Buscar</button></div>
+      <div id="results"></div>
+    </section>
+  </div>
+
+  <div>
+    <section>
+      <h2>3 · Mapa de asientos en vivo</h2>
+      <div id="tripInfo" class="muted">Selecciona un viaje.</div>
+      <div class="legend" style="margin:10px 0">
+        <span><i style="background:var(--free)"></i>Disponible</span><span><i style="background:var(--held)"></i>Retenido</span>
+        <span><i style="background:var(--sold)"></i>Vendido</span><span><i style="background:var(--offer)"></i>En oferta</span>
+        <span><i style="background:var(--mine)"></i>Mío</span>
+      </div>
+      <div id="seatmap"></div>
+    </section>
+    <section id="checkout" hidden>
+      <h2>4 · Compra</h2>
+      <div class="row"><div>Asiento <b id="selSeat"></b> retenido · expira en <span id="countdown">--:--</span></div>
+        <button id="btnRelease" class="ghost" style="flex:0 0 auto">Liberar</button></div>
+      <label>Nombre del viajero</label><input id="paxName" value="Ana Pérez">
+      <div class="row">
+        <div><label>Tipo doc.</label><select id="paxType"><option>CC</option><option>CE</option><option>TI</option><option>PA</option></select></div>
+        <div><label>Número</label><input id="paxDoc" value="1020304050"></div>
+      </div>
+      <label>Tarjeta (token sandbox)</label>
+      <select id="card"><option value="tok_visa_approved">Visa ···4242 (aprobada)</option><option value="tok_visa_declined">Visa ···0002 (rechazada)</option></select>
+      <div class="row" style="margin-top:10px"><button id="btnBook">Ver total y pagar</button></div>
+      <p id="payState" class="status"></p>
+      <div id="ticket"></div>
+    </section>
+  </div>
+
+  <div>
+    <section>
+      <h2>Viaje en curso</h2>
+      <div id="busPos" class="muted">Sin datos de GPS.</div>
+    </section>
+    <section>
+      <h2>Eventos en vivo</h2>
+      <div id="log"></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { api: 'http://localhost:8080', token: null, user: null, ws: null, itinerary: null, seats: {}, hold: null, timer: null, topics: [] };
+
+function log(text, cls = '') {
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = new Date().toLocaleTimeString() + '  ' + text;
+  $('log').prepend(d);
+}
+
+async function api(method, path, body, headers = {}) {
+  const h = { 'Content-Type': 'application/json', ...headers };
+  if (state.token) h.Authorization = 'Bearer ' + state.token;
+  const res = await fetch(state.api + path, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) throw Object.assign(new Error(data?.error?.message || res.statusText), { status: res.status, data });
+  return data;
+}
+
+// ---------------------------------------------------------------- sesión
+$('btnLogin').onclick = async () => {
+  try {
+    const r = await api('POST', '/auth/login', { email: $('email').value, password: $('password').value });
+    state.token = r.accessToken; state.user = r;
+    $('who').textContent = 'Conectado como ' + r.rol; $('who').className = 'status ok';
+    $('btnLogout').disabled = false;
+    connectWs();
+  } catch (e) { $('who').textContent = e.message; $('who').className = 'status err'; }
+};
+$('btnLogout').onclick = async () => {
+  try { await api('POST', '/auth/logout'); } catch (e) { /* ya cerrada */ }
+  state.token = null; state.ws?.close(); $('who').textContent = 'Sesión cerrada'; $('btnLogout').disabled = true;
+};
+
+// ---------------------------------------------------------------- WebSocket
+function connectWs() {
+  state.ws?.close();
+  const url = location.origin.replace(/^http/, 'ws') + '/ws?token=' + encodeURIComponent(state.token);
+  const ws = new WebSocket(url);
+  state.ws = ws;
+  ws.onopen = () => { $('wsState').textContent = 'WebSocket: conectado'; $('wsState').className = 'status ok'; state.topics.forEach(subscribe); };
+  ws.onclose = (e) => { $('wsState').textContent = 'WebSocket: sin conexión en vivo (' + e.code + ')'; $('wsState').className = 'status err'; };
+  ws.onmessage = (m) => onWsMessage(JSON.parse(m.data));
+}
+function subscribe(topic) {
+  if (!state.topics.includes(topic)) state.topics.push(topic);
+  if (state.ws?.readyState === 1) state.ws.send(JSON.stringify({ type: 'subscribe', topic }));
+}
+function unsubscribeAll() {
+  state.topics.forEach(t => state.ws?.readyState === 1 && state.ws.send(JSON.stringify({ type: 'unsubscribe', topic: t })));
+  state.topics = [];
+}
+function onWsMessage(msg) {
+  if (msg.type === 'ping') { state.ws.send('{"type":"pong"}'); return; }
+  if (msg.type === 'snapshot') {
+    log('snapshot ' + msg.topic.split(':')[0]);
+    if (msg.topic.endsWith(':asientos') && msg.data) { msg.data.asientos.forEach(s => state.seats[s.seatNumber] = s); paintSeats(); }
+    if (msg.topic.endsWith(':posicion') && msg.data) showPosition(msg.data);
+    if (msg.topic.endsWith(':eventos') && Array.isArray(msg.data)) msg.data.slice(-5).forEach(e => log('novedad ' + e.tipo + ' · ' + (e.descripcion || ''), 'warn'));
+    return;
+  }
+  if (msg.type === 'event') {
+    const d = msg.data;
+    if (msg.event === 'SeatStateChanged') {
+      const s = state.seats[d.seatNumber] || {};
+      state.seats[d.seatNumber] = { ...s, seatNumber: d.seatNumber, estado: d.estadoNuevo, offerId: d.offerId,
+        propio: d.estadoNuevo === 'RETENIDO' && state.hold?.seatNumbers.includes(d.seatNumber) || (s.propio && d.estadoNuevo === 'VENDIDO') };
+      paintSeats();
+      log('asiento ' + d.seatNumber + ' → ' + d.estadoNuevo);
+    } else if (msg.event === 'PositionUpdated') { showPosition(d); }
+    else if (msg.event === 'TripEventReported') { log('NOVEDAD ' + d.tipo + ' · ' + (d.descripcion || ''), 'warn'); }
+    else { log(msg.event + ' ' + JSON.stringify(d).slice(0, 80)); }
+    return;
+  }
+  if (msg.type === 'error') log('error ' + msg.code + ': ' + msg.message, 'err');
+}
+
+// ---------------------------------------------------------------- búsqueda
+async function loadCities() {
+  const cities = await api('GET', '/trips/cities');
+  for (const sel of ['origin', 'destination']) $(sel).innerHTML = cities.map(c => `<option>${c}</option>`).join('');
+  $('origin').value = 'Bogotá'; $('destination').value = 'Medellín';
+  const t = new Date(Date.now() + 86400000); $('date').value = t.toISOString().slice(0, 10);
+}
+$('btnSearch').onclick = async () => {
+  const q = new URLSearchParams({ origin: $('origin').value, destination: $('destination').value, date: $('date').value });
+  try {
+    const trips = await api('GET', '/trips/search?' + q);
+    $('results').innerHTML = trips.length ? '' : '<p class="muted">Sin viajes para esa fecha.</p>';
+    trips.forEach(t => {
+      const div = document.createElement('div');
+      div.className = 'trip';
+      const hora = new Date(t.fechaSalida).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const precio = t.ofertaActiva ? `<s>$${(+t.precioBase).toLocaleString()}</s> <span class="pill">⚡ $${(+t.ofertaActiva.precioOferta).toLocaleString()}</span>` : `$${(+t.precioBase).toLocaleString()}`;
+      div.innerHTML = `<b>${hora}</b> · ${t.empresa}<br>${precio} ${t.moneda} · ${t.agotado ? '<span class="err">Agotado</span>' : (t.asientosDisponibles ?? '?') + ' asientos'} · ${t.tipoBus.replace('_', ' ').toLowerCase()}`;
+      div.onclick = () => { document.querySelectorAll('.trip').forEach(x => x.classList.remove('sel')); div.classList.add('sel'); openTrip(t); };
+      $('results').appendChild(div);
+    });
+  } catch (e) { $('results').innerHTML = `<p class="err">${e.message}</p>`; }
+};
+
+// ---------------------------------------------------------------- mapa de asientos
+async function openTrip(t) {
+  unsubscribeAll();
+  state.itinerary = t; state.seats = {};
+  const [map, states] = await Promise.all([api('GET', `/itineraries/${t.itineraryId}/seatmap`), api('GET', `/seats/itineraries/${t.itineraryId}`)]);
+  states.asientos.forEach(s => state.seats[s.seatNumber] = s);
+  $('tripInfo').innerHTML = `<b>${t.origen} → ${t.destino}</b> · ${new Date(t.fechaSalida).toLocaleString()} · bus ${map.placa}`;
+  $('seatmap').innerHTML = '';
+  map.distribucion.pisos.forEach(piso => {
+    const bus = document.createElement('div');
+    bus.className = 'bus';
+    bus.style.gridTemplateColumns = `repeat(${piso.columnas}, 38px)`;
+    const cells = [...piso.celdas].sort((a, b) => a.fila - b.fila || a.columna - b.columna);
+    cells.forEach(c => {
+      const el = document.createElement('div');
+      el.className = 'cell ' + c.tipo;
+      if (c.tipo === 'ASIENTO') { el.dataset.seat = c.asiento; el.textContent = c.asiento; el.onclick = () => holdSeat(c.asiento); }
+      else el.textContent = { BANO: 'WC', CONDUCTOR: '🚍', ESCALERA: '⇅', PUERTA: '⇥' }[c.tipo] || '';
+      bus.appendChild(el);
+    });
+    const wrap = document.createElement('div'); wrap.style.display = 'inline-block';
+    wrap.innerHTML = `<div class="muted">Piso ${piso.piso}</div>`; wrap.appendChild(bus);
+    $('seatmap').appendChild(wrap);
+  });
+  paintSeats();
+  subscribe(`itinerario:${t.itineraryId}:asientos`);
+  subscribe(`bus:${t.busId}:posicion`);
+  subscribe(`viaje:${t.itineraryId}:eventos`);
+}
+function paintSeats() {
+  document.querySelectorAll('[data-seat]').forEach(el => {
+    const s = state.seats[el.dataset.seat];
+    if (!s) return;
+    el.className = 'cell ASIENTO ' + s.estado + (s.propio ? ' propio' : '');
+    el.title = s.estado;
+  });
+}
+async function holdSeat(seat) {
+  if (!state.token) { log('Inicia sesión para retener un asiento', 'err'); return; }
+  if (state.hold) { log('Ya tienes un asiento retenido', 'warn'); return; }
+  try {
+    const hold = await api('POST', '/seats/holds', { itineraryId: state.itinerary.itineraryId, seatNumbers: [seat] });
+    state.hold = hold;
+    state.seats[seat] = { ...state.seats[seat], estado: 'RETENIDO', propio: true }; paintSeats();
+    $('checkout').hidden = false; $('selSeat').textContent = seat; $('ticket').innerHTML = ''; $('payState').textContent = '';
+    startCountdown(new Date(hold.expiraEn));
+    log('retuviste el asiento ' + seat, 'ok');
+  } catch (e) { log('no se pudo retener ' + seat + ': ' + e.message, 'err'); }
+}
+function startCountdown(until) {
+  clearInterval(state.timer);
+  state.timer = setInterval(() => {
+    const s = Math.max(0, Math.round((until - Date.now()) / 1000));
+    $('countdown').textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    if (s === 0) { clearInterval(state.timer); log('la retención expiró', 'err'); state.hold = null; }
+  }, 500);
+}
+$('btnRelease').onclick = async () => {
+  if (!state.hold) return;
+  await api('DELETE', '/seats/holds/' + state.hold.holdId).catch(() => {});
+  state.hold = null; clearInterval(state.timer); $('checkout').hidden = true;
+};
+
+// ---------------------------------------------------------------- reserva y pago
+$('btnBook').onclick = async () => {
+  if (!state.hold) return;
+  $('btnBook').disabled = true;
+  try {
+    const booking = await api('POST', '/bookings', { holdId: state.hold.holdId,
+      pasajeros: [{ nombre: $('paxName').value, tipoDocumento: $('paxType').value, numeroDocumento: $('paxDoc').value }] });
+    $('payState').textContent = `Total: $${(+booking.total).toLocaleString()} ${booking.moneda} · pagando…`;
+    const key = crypto.randomUUID();
+    await api('POST', `/bookings/${booking.bookingId}/pay`, { cardToken: $('card').value, cardLast4: '4242' }, { 'Idempotency-Key': key });
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const b = await api('GET', '/bookings/' + booking.bookingId);
+      if (['CONFIRMADA', 'PAGO_RECHAZADO', 'REEMBOLSADA', 'EXPIRADA'].includes(b.estado)) {
+        clearInterval(state.timer);
+        $('payState').textContent = 'Reserva ' + b.estado; $('payState').className = 'status ' + (b.estado === 'CONFIRMADA' ? 'ok' : 'err');
+        if (b.ticketId) {
+          const t = await api('GET', '/tickets/' + b.ticketId);
+          $('ticket').innerHTML = `<p>Tiquete <b>${t.ticketId.slice(0, 8)}</b> · ${t.origen} → ${t.destino} · asiento ${t.seatNumbers.join(', ')}</p><img class="qr" src="${t.qrImage}" alt="QR">`;
+        }
+        state.hold = null;
+        break;
+      }
+    }
+  } catch (e) { $('payState').textContent = e.message; $('payState').className = 'status err'; }
+  $('btnBook').disabled = false;
+};
+
+// ---------------------------------------------------------------- GPS
+function showPosition(p) {
+  $('busPos').innerHTML = `Bus en <b>${(+p.lat).toFixed(4)}, ${(+p.lng).toFixed(4)}</b><br>${p.velocidad ?? '?'} km/h · rumbo ${p.rumbo ?? '?'}°<br><span class="muted">${new Date(p.timestamp).toLocaleTimeString()}</span>`;
+}
+
+// ---------------------------------------------------------------- inicio
+fetch('/demo-config.json').then(r => r.json()).then(c => { state.api = c.apiUrl; return loadCities(); })
+  .catch(e => log('No se pudo cargar la configuración: ' + e.message, 'err'));
+</script>
+</body>
+</html>
