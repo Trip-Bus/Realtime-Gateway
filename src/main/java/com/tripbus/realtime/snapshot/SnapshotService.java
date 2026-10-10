@@ -2,6 +2,7 @@ package com.tripbus.realtime.snapshot;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.tripbus.realtime.config.RealtimeProperties;
+import com.tripbus.realtime.config.RequestIdPropagationInterceptor;
 import com.tripbus.realtime.ws.Topics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,7 +33,11 @@ public class SnapshotService {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(1000);
         factory.setReadTimeout(3000);
-        return RestClient.builder().baseUrl(baseUrl).requestFactory(factory).build();
+        return RestClient.builder()
+                .baseUrl(baseUrl)
+                .requestFactory(factory)
+                .requestInterceptor(new RequestIdPropagationInterceptor())
+                .build();
     }
 
     /** Optional.empty() = no se pudo obtener; Optional.of(NullNode) = no hay datos todavía. */

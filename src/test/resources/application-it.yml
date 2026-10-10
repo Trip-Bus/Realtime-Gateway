@@ -1,0 +1,6 @@
+# Perfil de pruebas de integración (RealtimeIT). Redis lo levanta Testcontainers y @ServiceConnection
+# inyecta su host/puerto: aquí solo va lo propio de las pruebas.
+tripbus:
+  realtime:
+    # Stream aparte para no mezclar eventos de prueba con los de QA.
+    events-stream: tripbus:events:realtime-test
