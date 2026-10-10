@@ -1,0 +1,67 @@
+# Entorno QA de realtime-gateway SOLO (perfil Spring "qa"): Redis con contraseña y el servicio
+# construido desde este repo. Este servicio NO tiene base de datos.
+#
+#   cp .env.example .env           # valores de QA local (el .env no se sube a git)
+#   docker compose up -d --build   # levantar
+#   docker compose ps              # esperar a que todo esté "healthy"
+#   docker compose logs -f realtime-gateway
+#   docker compose down            # detener conservando datos (down -v los borra)
+#
+# Qué se puede probar con este compose solo:
+#   - /actuator/health, /actuator/info, la página de demostración (http://localhost:18007/) y
+#     /demo-config.json.
+#   - El handshake de ws://localhost:18007/ws: sin token abre y exige {"type":"connect",...};
+#     con un token inválido responde 401.
+#   - Conectarse con un JWT válido, los snapshots y los eventos en vivo necesitan identity (18001),
+#     seat-inventory (18003), fleet (18005), flash-offers (18006) y el api-gateway (18000):
+#     pruébalo con el compose general de API-gateway. Desde aquí se buscan en tu PC vía
+#     host.docker.internal.
+#
+# OJO: no lo corras a la vez que el compose general de API-gateway: usan los mismos puertos
+# (18007, 18100) y fallaría con "port is already allocated".
+name: tripbus-realtime-gateway
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Falta REDIS_PASSWORD en .env}"]
+    environment:
+      # redis-cli lee la contraseña de aquí (así no aparece en la línea de comandos).
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    ports:
+      - "18100:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  realtime-gateway:
+    build:
+      context: .
+      args:
+        GIT_COMMIT: qa-local
+    image: ghcr.io/trip-bus/realtime-gateway:qa-local
+    env_file: .env
+    # Estas ganan sobre .env: dentro de Docker se habla con Redis por nombre y puerto interno, y con
+    # los servicios que corren en tu PC por host.docker.internal.
+    environment:
+      SPRING_PROFILES_ACTIVE: qa
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      IDENTITY_JWKS_URI: http://host.docker.internal:18001/.well-known/jwks.json
+      SEAT_INVENTORY_URL: http://host.docker.internal:18003
+      FLEET_URL: http://host.docker.internal:18005
+      FLASH_OFFERS_URL: http://host.docker.internal:18006
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "18007:18007"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:

@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.3.4</version>
+        <version>3.5.16</version>
         <relativePath/>
     </parent>
 
@@ -19,6 +19,39 @@
 
     <properties>
         <java.version>21</java.version>
+
+        <!-- Parches de seguridad (Trivy) más nuevos que los que gestiona Boot 3.5.16, dentro de las
+             mismas líneas menores. Quitarlos cuando una Boot 3.5.x posterior ya los traiga. -->
+        <jackson-bom.version>2.21.7</jackson-bom.version>
+        <netty.version>4.1.137.Final</netty.version>
+        <tomcat.version>10.1.60</tomcat.version>
+
+        <logstash-logback.version>8.0</logstash-logback.version>
+        <jacoco.version>0.8.12</jacoco.version>
+        <sonar-maven-plugin.version>5.8.0.7211</sonar-maven-plugin.version>
+
+        <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
+             La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
+             Fijados con la medición del 2026-10-09 redondeada hacia abajo al 5 %: líneas 73,8 % -> 0.70;
+             ramas 60,1 % -> 0.60 (varía ~1 punto entre corridas según si el heartbeat programado
+             alcanza a ejecutarse durante RealtimeIT; ambos mínimos quedan por debajo). -->
+        <jacoco.minimo.lineas>0.70</jacoco.minimo.lineas>
+        <jacoco.minimo.ramas>0.60</jacoco.minimo.ramas>
+
+        <!-- SonarQube Cloud: el análisis lo lanza el CI solo en develop (push y PR con base develop)
+             cuando existe el secreto SONAR_TOKEN. El plan Free analiza una única rama. -->
+        <sonar.organization>trip-bus</sonar.organization>
+        <sonar.projectKey>Trip-Bus_Realtime-Gateway</sonar.projectKey>
+        <sonar.host.url>https://sonarcloud.io</sonar.host.url>
+        <sonar.coverage.jacoco.xmlReportPaths>${project.build.directory}/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
+        <!-- Fuera de la cobertura solo lo que no tiene lógica que probar (se sigue analizando como código):
+             el arranque de Spring. Se queda DENTRO config/RealtimeProperties: aunque es un record de
+             configuración, su constructor compacto tiene lógica (valores por defecto). No hay
+             OpenApiConfig: este servicio no tiene Swagger. MISMA lista en <excludes> de
+             jacoco-maven-plugin (formato .class). -->
+        <sonar.coverage.exclusions>
+            **/RealtimeGatewayApplication.java
+        </sonar.coverage.exclusions>
     </properties>
 
     <dependencies>
@@ -48,31 +81,128 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
 
+        <!-- Logs en JSON en PROD (logback-spring.xml). -->
+        <dependency>
+            <groupId>net.logstash.logback</groupId>
+            <artifactId>logstash-logback-encoder</artifactId>
+            <version>${logstash-logback.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- Pruebas de integración contra Redis real (RealtimeIT, Testcontainers). Sin módulo
+             postgresql: este servicio no tiene base de datos. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
+        <pluginManagement>
+            <plugins>
+                <!-- Versión fija del scanner que invoca el CI (mvn ... sonar-maven-plugin:sonar). -->
+                <plugin>
+                    <groupId>org.sonarsource.scanner.maven</groupId>
+                    <artifactId>sonar-maven-plugin</artifactId>
+                    <version>${sonar-maven-plugin.version}</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <!-- META-INF/build-info.properties: versión y fecha en /actuator/info. -->
+                    <execution>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <!-- Las pruebas de integración (*IT) necesitan Redis real:
-                         se activan con la variable de entorno TRIPBUS_IT=true. -->
+                    <!-- Unitarias (*Test, *Tests) e integración (*IT, Testcontainers: requiere Docker). -->
                     <includes>
                         <include>**/*Test.java</include>
                         <include>**/*Tests.java</include>
                         <include>**/*IT.java</include>
                     </includes>
                 </configuration>
+            </plugin>
+
+            <!-- Cobertura: target/site/jacoco/index.html (y jacoco.xml para Sonar).
+                 Además jacoco:check (fase verify) corre en TODAS las ramas, también en main donde no
+                 corre Sonar: rompe el build si la cobertura total baja de jacoco.minimo.lineas/ramas.
+                 La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo. -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <configuration>
+                    <!-- Mismas exclusiones que sonar.coverage.exclusions, para que el % coincida. -->
+                    <excludes>
+                        <exclude>**/RealtimeGatewayApplication.class</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.minimo.lineas}</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.minimo.ramas}</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

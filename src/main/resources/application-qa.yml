@@ -1,0 +1,4 @@
+# Perfil "qa": Docker Compose en el computador del desarrollador (activa también "desplegado").
+logging:
+  level:
+    com.tripbus: DEBUG
