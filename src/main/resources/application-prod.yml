@@ -5,3 +5,9 @@
 logging:
   level:
     com.tripbus: INFO
+
+tripbus:
+  realtime:
+    # US-030: en PROD el JWT nunca viaja en la URL (logs, historial, proxies). ?token se ignora y el
+    # cliente se autentica con {"type":"connect","token":...}. No subir a true en PROD.
+    allow-query-token: ${WS_ALLOW_QUERY_TOKEN:false}

@@ -19,6 +19,10 @@ spring:
 server:
   port: ${SERVER_PORT:18007}
   shutdown: graceful
+  # Detrás del API Gateway NGINX: no se confía en X-Forwarded-* (ni para autenticar, que depende solo
+  # del JWT, ni para el chequeo de Origin, que usa WS_ALLOWED_ORIGINS). Explícito porque Spring Boot
+  # lo activa solo al detectar Kubernetes.
+  forward-headers-strategy: none
 
 management:
   endpoints:
@@ -46,6 +50,9 @@ tripbus:
     jwks-uri: ${IDENTITY_JWKS_URI:http://localhost:18001/.well-known/jwks.json}
     events-stream: ${EVENTS_STREAM:tripbus:events}
     allowed-origins: ${WS_ALLOWED_ORIGINS:*}
+    # ?token=JWT en la URL de /ws (queda en logs, historial y proxies). true solo para IDE/QA; PROD lo
+    # pone en false y el cliente se autentica con {"type":"connect","token":...} (US-030).
+    allow-query-token: ${WS_ALLOW_QUERY_TOKEN:true}
     heartbeat-interval: 20s
     heartbeat-interval-ms: 20000
     heartbeat-timeout: 45s

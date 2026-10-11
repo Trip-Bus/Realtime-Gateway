@@ -50,6 +50,7 @@ public class RequestIdFilter extends OncePerRequestFilter {
         } finally {
             // Log de acceso (una línea por petición) para poder buscar cualquier petición por su
             // requestId. Se omite /actuator: el healthcheck de Docker llama cada 10 s.
+            // Solo la ruta (getRequestURI), nunca la query string: puede traer ?token=JWT (US-030).
             if (!request.getRequestURI().startsWith("/actuator")) {
                 log.info("{} {} -> {} ({} ms)", request.getMethod(), request.getRequestURI(),
                         response.getStatus(), (System.nanoTime() - inicio) / 1_000_000);

@@ -16,7 +16,9 @@ public record RealtimeProperties(
         String seatInventoryUrl,
         String flashOffersUrl,
         String fleetUrl,
-        String publicApiUrl) {
+        String publicApiUrl,
+        // Acepta ?token=JWT en el handshake de /ws (IDE y QA). En PROD false: solo el mensaje connect.
+        boolean allowQueryToken) {
 
     public RealtimeProperties {
         eventsStream = eventsStream != null ? eventsStream : "tripbus:events";
