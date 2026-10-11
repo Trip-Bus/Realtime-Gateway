@@ -41,8 +41,11 @@ import static org.mockito.Mockito.when;
 /**
  * US-020/US-021: conexión autenticada, snapshot inicial y difusión en vivo contra Redis 7 real
  * (Testcontainers, requiere Docker). identity y los servicios de snapshot se simulan con mocks.
+ * Con allow-query-token=true (IDE/QA) se autentica con ?token en la URL; el caso PROD (false) está
+ * en RealtimeSinQueryTokenIT.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "tripbus.realtime.allow-query-token=true")
 @ActiveProfiles("it")
 @Testcontainers
 class RealtimeIT {

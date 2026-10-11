@@ -44,7 +44,7 @@ class EventFanoutTest {
         meters = new SimpleMeterRegistry();
         registry = new SessionRegistry(meters);
         RealtimeProperties properties = new RealtimeProperties(null, null, null, null, null, null, 0,
-                null, null, null, null);
+                null, null, null, null, false);
         fanout = new EventFanout(mock(RedisConnectionFactory.class), mock(StringRedisTemplate.class), registry,
                 new ObjectMapper(), properties, meters);
     }

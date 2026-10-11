@@ -11,7 +11,38 @@ envía el snapshot inicial y difunde los eventos. **No tiene lógica de negocio 
 
 ## Protocolo
 
-Conexión: `ws://localhost:18007/ws?token=<JWT>` (o conectar sin token y enviar `{"type":"connect","token":"..."}` en ≤ 10 s).
+### Conectarse y autenticarse en `/ws`
+
+La URL pública es la del **API Gateway** (NGINX), no la de este servicio: `ws(s)://<gateway>:18000/ws`
+(en local `ws://localhost:18000/ws`). El 18007 solo se usa directo en el IDE y en el compose de QA de este repo.
+
+**Forma recomendada (la única en PROD):** abrir `/ws` **sin token** y, apenas abra, enviar el JWT
+en el primer mensaje, antes de 10 s:
+
+```js
+const ws = new WebSocket("wss://<gateway>:18000/ws");
+ws.onopen = () => ws.send(JSON.stringify({ type: "connect", token: jwt }));
+// servidor → {"type":"connected","userId":...,"role":...,"heartbeatSeconds":20,"tokenExpiresAt":...}
+```
+
+Si no llega un `connect` válido en 10 s, el servidor envía `{"type":"error","code":"AUTH_TIMEOUT"}`
+y cierra con 4401; cualquier `subscribe` antes de autenticarse responde `UNAUTHENTICATED`.
+
+**`?token=<JWT>` en la URL (heredado, solo IDE y QA):** un token en la URL queda en logs, historial
+del navegador y proxies, así que se controla con `WS_ALLOW_QUERY_TOKEN`
+(`tripbus.realtime.allow-query-token`):
+
+| Entorno | `WS_ALLOW_QUERY_TOKEN` | Efecto de `?token=` |
+|---|---|---|
+| IDE / QA | `true` | Se valida en el handshake (401 si es inválido) y la conexión queda autenticada. |
+| PROD | `false` | Se **ignora** (el handshake no falla, pero no autentica): hay que mandar `connect`. |
+
+El servicio nunca escribe la query string ni el token en los logs (el log de acceso solo lleva la
+ruta). Detrás del gateway, la autenticación depende solo del JWT y el `Origin` se valida contra
+`WS_ALLOWED_ORIGINS`; los headers `X-Forwarded-*` no se usan para nada
+(`server.forward-headers-strategy: none`).
+
+### Mensajes
 
 | Cliente → servidor | Servidor → cliente |
 |---|---|
@@ -20,7 +51,8 @@ Conexión: `ws://localhost:18007/ws?token=<JWT>` (o conectar sin token y enviar 
 | `{"type":"ping"}` / `{"type":"pong"}` | `ping` cada 20 s (sin respuesta en 45 s ⇒ se cierra con 4408) |
 
 Tópicos: `itinerario:{id}:asientos`, `oferta:{id}:cupo`, `viaje:{id}:eventos`, `bus:{id}:posicion`.
-Token inválido ⇒ 401 en el handshake; token vencido ⇒ cierre 4401 (el cliente reconecta con uno nuevo).
+Token inválido en `connect` ⇒ `INVALID_TOKEN` y cierre 4401 (en `?token=`, si está permitido, ⇒ 401
+en el handshake); token vencido ⇒ cierre 4401 (el cliente reconecta con uno nuevo).
 Nunca se reenvía el `userId` de otros pasajeros.
 
 Cada réplica lee **todos** los eventos de `tripbus:events` (Redis Streams) y los entrega a sus
@@ -76,7 +108,7 @@ Puertos de este repo (el contenedor escucha en el mismo puerto que publica):
 
 | Servicio | QA (publicado) | Dentro de Docker | PROD |
 |---|---|---|---|
-| realtime-gateway | 18007 | 18007 | **18007 publicado** (los navegadores se conectan directo al WebSocket) |
+| realtime-gateway | 18007 | 18007 | no se publica: los navegadores entran por el API Gateway (`ws(s)://<gateway>:18000/ws`) |
 | Redis (compartido, con contraseña) | 18100 | 6379 | nunca se publica |
 
 Este servicio no tiene base de datos. Otros servicios que usa: identity (JWKS, `IDENTITY_JWKS_URI`,
@@ -137,14 +169,15 @@ no arranca y dice cuáles faltan (`RequiredSecretsCheck`).
 | `WS_ALLOWED_ORIGINS` | ✔ | `*` (QA: `http://localhost:5173,http://localhost:18007`) |
 
 Opcionales con valor por defecto: `SERVER_PORT` (18007), `REDIS_HOST` (localhost), `REDIS_PORT` (18100),
-`EVENTS_STREAM` (`tripbus:events`). Este servicio no usa `DB_*` (no tiene base de datos; `DB_HOST`
+`EVENTS_STREAM` (`tripbus:events`), `WS_ALLOW_QUERY_TOKEN` (IDE y QA `true`, PROD `false`; ver
+[Conectarse y autenticarse](#conectarse-y-autenticarse-en-ws)). Este servicio no usa `DB_*` (no tiene base de datos; `DB_HOST`
 reemplaza a la antigua `DB_URL` solo en los servicios que la tienen) ni `INTERNAL_API_TOKEN`.
 
 ## Swagger
 
 Este servicio **no tiene Swagger/OpenAPI** en ningún entorno: no expone una API REST de negocio, solo
 el WebSocket `/ws` (protocolo descrito arriba) y `/demo-config.json`. La autenticación es el JWT del
-handshake (`HandshakeAuthInterceptor`), no Spring Security. La documentación de las APIs REST de
+mensaje `connect` (o de `?token=` en el handshake, `HandshakeAuthInterceptor`, solo si está permitido), no Spring Security. La documentación de las APIs REST de
 TripBus está en el Swagger de cada servicio (ver el README de **API-gateway**).
 
 ## Observabilidad
@@ -166,10 +199,13 @@ mvn -B verify      # unitarias + integración con Redis real (Testcontainers: Do
 ```
 
 - `*Test` / `*Tests`: unitarias (`TopicsTest`, `RequiredSecretsCheckTest`, `RequestIdFilterTest`,
-  `RequestIdPropagationInterceptorTest`).
+  `RequestIdPropagationInterceptorTest`, `ClientSessionTest`, `EventFanoutTest`,
+  `HandshakeAuthInterceptorTest`, `PerfilesConfigTest`).
 - `RealtimeIT`: levanta Redis 7 con Testcontainers y prueba de extremo a extremo la conexión
-  autenticada, el snapshot inicial, la difusión desde Redis Streams (sin exponer `userId`), el ping
-  y el rechazo de tokens y tópicos inválidos.
+  autenticada con `?token=` (`allow-query-token=true`), el snapshot inicial, la difusión desde Redis
+  Streams (sin exponer `userId`), el ping y el rechazo de tokens y tópicos inválidos.
+- `RealtimeSinQueryTokenIT`: como PROD (`allow-query-token=false`): `?token=` sin `connect` se cierra
+  al vencer el plazo, y `connect` sin token en la URL queda autenticado.
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -187,10 +223,10 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-10-09) | Mínimo |
+| Métrica | Medido (2026-10-10) | Mínimo |
 |---|---|---|
-| Líneas | 73,8–74,9 % | `jacoco.minimo.lineas` = 0.70 |
-| Ramas | 60,1–60,9 % | `jacoco.minimo.ramas` = 0.60 |
+| Líneas | 81,9 % | `jacoco.minimo.lineas` = 0.80 |
+| Ramas | 78,2 % | `jacoco.minimo.ramas` = 0.75 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y

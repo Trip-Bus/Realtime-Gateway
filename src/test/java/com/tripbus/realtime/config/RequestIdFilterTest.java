@@ -1,7 +1,10 @@
 package com.tripbus.realtime.config;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.slf4j.MDC;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.mock.web.MockFilterChain;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -11,6 +14,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+@ExtendWith(OutputCaptureExtension.class)
 class RequestIdFilterTest {
 
     private final RequestIdFilter filter = new RequestIdFilter();
@@ -47,6 +51,16 @@ class RequestIdFilterTest {
 
         assertThat(UUID.fromString(requestId)).isNotNull();
         assertThat(response.getHeader(RequestIdFilter.HEADER)).isEqualTo(requestId);
+    }
+
+    @Test
+    void elLogDeAccesoNoIncluyeLaQueryStringNiElToken(CapturedOutput output) throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/ws");
+        request.setQueryString("token=eyJ.secreto.jwt");
+
+        filtrar(request, new MockHttpServletResponse());
+
+        assertThat(output).contains("GET /ws -> 200").doesNotContain("token=").doesNotContain("secreto");
     }
 
     @Test
