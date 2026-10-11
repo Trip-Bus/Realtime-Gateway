@@ -19,6 +19,7 @@ import org.springframework.data.redis.connection.stream.StreamOffset;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.stream.StreamMessageListenerContainer;
 import org.springframework.stereotype.Component;
+import org.springframework.web.socket.CloseStatus;
 
 import java.time.Duration;
 import java.util.Iterator;
@@ -112,13 +113,27 @@ public class EventFanout implements SmartLifecycle {
                 out.set("data", sanitize(payload));
                 String json = out.toString();
                 for (ClientSession session : subscribers) {
-                    session.send(json);
-                    delivered.increment();
+                    deliver(session, json);
                 }
             }
         } catch (Exception e) {
             log.warn("Evento {} no difundido: {}", type, e.getMessage());
         }
+    }
+
+    /** Un fallo con un suscriptor nunca impide enviar al siguiente (US-031). */
+    private void deliver(ClientSession session, String json) {
+        try {
+            if (session.send(json)) {
+                delivered.increment();
+                return;
+            }
+        } catch (RuntimeException e) {
+            log.warn("Fallo inesperado enviando a la sesión {} ({})", session.id(), e.getClass().getSimpleName());
+            session.close(CloseStatus.SESSION_NOT_RELIABLE);
+        }
+        // La sesión fallida o ya cerrada deja de recibir eventos aunque el cierre tarde.
+        registry.remove(session.id());
     }
 
     private static JsonNode sanitize(JsonNode payload) {
