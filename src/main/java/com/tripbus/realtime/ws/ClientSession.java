@@ -1,5 +1,7 @@
 package com.tripbus.realtime.ws;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -12,6 +14,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /** Estado en memoria de una conexión (el gateway no tiene base de datos). */
 public class ClientSession {
+
+    private static final Logger log = LoggerFactory.getLogger(ClientSession.class);
 
     private final WebSocketSession session;
     private final Instant connectedAt;
@@ -46,24 +50,37 @@ public class ClientSession {
         this.lastSeen = now;
     }
 
-    public void send(String json) {
+    /**
+     * Envía un mensaje a esta conexión. Nunca lanza: si el cliente es lento (el decorador
+     * excede el tiempo o el buffer y lanza SessionLimitExceededException) o la conexión
+     * falla, se cierra SOLO esta sesión y se devuelve false, para no cortar la difusión a
+     * los demás suscriptores (US-031).
+     *
+     * @return true si el mensaje se entregó al transporte
+     */
+    public boolean send(String json) {
         if (!session.isOpen()) {
-            return;
+            return false;
         }
         try {
             session.sendMessage(new TextMessage(json));
-        } catch (IOException | IllegalStateException e) {
+            return true;
+        } catch (IOException | RuntimeException e) {
+            // Sin el contenido del mensaje: puede llevar datos del evento.
+            log.warn("Envío fallido a la sesión {} ({}); se cierra", id(), e.getClass().getSimpleName());
             close(CloseStatus.SESSION_NOT_RELIABLE);
+            return false;
         }
     }
 
+    /** Idempotente: no hace nada si la sesión ya está cerrada o se está cerrando. */
     public void close(CloseStatus status) {
         try {
             if (session.isOpen()) {
                 session.close(status);
             }
-        } catch (IOException ignored) {
-            // ya cerrada
+        } catch (IOException | RuntimeException ignored) {
+            // ya cerrada o cerrándose
         }
     }
 
