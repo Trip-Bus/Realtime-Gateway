@@ -140,4 +140,36 @@ class EventFanoutTest {
         assertThat(payload.has("holdId")).as("no modifica el payload original").isTrue();
         assertThat(EventFanout.sanitize(new ObjectMapper().readTree("\"texto\"")).asText()).isEqualTo("texto");
     }
+
+    @Test
+    void elAvisoDeTiqueteLlevaSoloLosIdsSinQrNiUserId() throws IOException {
+        UUID userId = UUID.randomUUID();
+        String privado = "usuario:" + userId + ":tiquetes";
+        WebSocketSession raw = raw("comprador");
+        ClientSession session = new ClientSession(raw, Instant.now());
+        registry.add(session);
+        registry.subscribe(session, privado);
+
+        fanout.onEvent(StreamRecords.newRecord().in("tripbus:events").ofMap(Map.of(
+                "type", "TicketIssued",
+                "eventId", UUID.randomUUID().toString(),
+                "occurredAt", Instant.now().toString(),
+                "payload", """
+                        {"bookingId":"b1","ticketId":"t1","qrCode":"QR-SECRETO","itineraryId":"i1",
+                         "seatNumbers":["3","4"],"userId":"%s","offerId":"o1"}""".formatted(userId))));
+
+        var captor = ArgumentCaptor.forClass(TextMessage.class);
+        verify(raw).sendMessage(captor.capture());
+        var data = new ObjectMapper().readTree(captor.getValue().getPayload()).path("data");
+        assertThat(data.toString()).isEqualTo(
+                "{\"bookingId\":\"b1\",\"ticketId\":\"t1\",\"itineraryId\":\"i1\",\"seatNumbers\":[\"3\",\"4\"]}");
+        // El uuid solo aparece en el nombre del tema, que el dueño ya conoce.
+        assertThat(captor.getValue().getPayload()).doesNotContain("QR-SECRETO", "qrCode", "userId", "offerId");
+    }
+
+    @Test
+    void elAvisoDeTiqueteOmiteLosCamposQueNoVienen() throws IOException {
+        var data = EventFanout.data("TicketIssued", new ObjectMapper().readTree("{\"ticketId\":\"t1\",\"qrCode\":\"q\"}"));
+        assertThat(data.toString()).isEqualTo("{\"ticketId\":\"t1\"}");
+    }
 }

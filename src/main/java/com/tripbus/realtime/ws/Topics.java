@@ -16,14 +16,34 @@ import java.util.regex.Pattern;
  *   <li>{@code oferta:{id}:cupo} — cupo restante de una oferta</li>
  *   <li>{@code viaje:{id}:eventos} — novedades del viaje</li>
  *   <li>{@code bus:{id}:posicion} — posición GPS del bus</li>
+ *   <li>{@code usuario:{id}:tiquetes} — PRIVADO: aviso de tiquete emitido (US-033); solo lo sigue la
+ *       sesión autenticada de ese usuario</li>
  * </ul>
  */
 public final class Topics {
 
     private static final String UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
-    private static final Pattern TOPIC = Pattern.compile("^(itinerario|oferta|viaje|bus):(" + UUID_RE + "):(asientos|cupo|eventos|posicion)$");
+    private static final Pattern TOPIC = Pattern.compile("^(itinerario|oferta|viaje|bus|usuario):(" + UUID_RE + "):(asientos|cupo|eventos|posicion|tiquetes)$");
 
-    public enum Kind { ASIENTOS, CUPO, EVENTOS, POSICION }
+    public enum Kind {
+        ASIENTOS, CUPO, EVENTOS, POSICION,
+        /** Sin snapshot: el aviso solo trae ids y la app pide el tiquete por GET /tickets/{id}. */
+        TIQUETES(false);
+
+        private final boolean snapshot;
+
+        Kind() {
+            this(true);
+        }
+
+        Kind(boolean snapshot) {
+            this.snapshot = snapshot;
+        }
+
+        public boolean hasSnapshot() {
+            return snapshot;
+        }
+    }
 
     public record Parsed(Kind kind, UUID id) {
     }
@@ -54,6 +74,7 @@ public final class Topics {
             case "oferta:cupo" -> Kind.CUPO;
             case "viaje:eventos" -> Kind.EVENTOS;
             case "bus:posicion" -> Kind.POSICION;
+            case "usuario:tiquetes" -> Kind.TIQUETES;
             default -> null;
         };
         return kind == null ? null : new Parsed(kind, UUID.fromString(m.group(2)));
@@ -65,6 +86,21 @@ public final class Topics {
         return parsed != null && PUBLIC_KINDS.contains(parsed.kind());
     }
 
+    /**
+     * true si la sesión del usuario {@code userId} puede seguir este tópico privado: solo su propio
+     * {@code usuario:{uuid}:tiquetes} (ni ADMIN sigue los de otros). Anónimo (userId null) ⇒ false.
+     */
+    public static boolean isOwnedBy(Parsed parsed, String userId) {
+        if (parsed == null || userId == null) {
+            return false;
+        }
+        try {
+            return parsed.id().equals(UUID.fromString(userId));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
     /** Tópicos a los que se difunde un evento de dominio. */
     public static List<String> forEvent(String type, JsonNode payload) {
         return switch (type) {
@@ -74,6 +110,7 @@ public final class Topics {
                     single("oferta:", payload, "offerId", ":cupo");
             case "TripEventReported" -> single("viaje:", payload, "itineraryId", ":eventos");
             case "PositionUpdated" -> single("bus:", payload, "busId", ":posicion");
+            case "TicketIssued" -> single("usuario:", payload, "userId", ":tiquetes");
             default -> List.of();
         };
     }

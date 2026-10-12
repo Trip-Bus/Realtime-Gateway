@@ -7,7 +7,7 @@ envía el snapshot inicial y difunde los eventos. **No tiene lógica de negocio 
 
 **Stack:** Java 21 · Spring Boot 3.5.16 · Redis 7
 
-**HU:** US-020, US-021, US-039 (seguimiento público), US-047 (parte), US-056 (parte) · **Puerto:** 18007 · **BD:** ninguna (solo Redis)
+**HU:** US-020, US-021, US-033 (aviso de tiquete), US-039 (seguimiento público), US-047 (parte), US-056 (parte) · **Puerto:** 18007 · **BD:** ninguna (solo Redis)
 
 ## Protocolo
 
@@ -51,11 +51,32 @@ ruta). Detrás del gateway, la autenticación depende solo del JWT y el `Origin`
 | `{"type":"unsubscribe","topic":"..."}` | `event` con `{topic, event, eventId, data}` |
 | `{"type":"ping"}` / `{"type":"pong"}` | `ping` cada 20 s (sin respuesta en 45 s ⇒ se cierra con 4408) |
 
-Tópicos: `itinerario:{id}:asientos`, `oferta:{id}:cupo`, `viaje:{id}:eventos`, `bus:{id}:posicion`.
+#### Tópicos
+
+| Tópico | Acceso | Eventos | Snapshot |
+|---|---|---|---|
+| `itinerario:{id}:asientos` | Público | `SeatHeld`, `SeatReleased`, `SeatSold`, `HoldExpired`, `SeatStateChanged` | Mapa de asientos (seat-inventory) |
+| `oferta:{id}:cupo` | Público | `OfferQuotaUpdated`, `OfferClosed`, `OfferSoldOut`, `OfferActivated` | Cupo (flash-offers) |
+| `viaje:{id}:eventos` | Público | `TripEventReported` | Línea de tiempo (fleet) |
+| `bus:{id}:posicion` | Público | `PositionUpdated` | Última posición (fleet) |
+| `usuario:{uuid}:tiquetes` | **Privado**: solo la sesión autenticada cuyo `userId` es `{uuid}` | `TicketIssued` (US-033) | Ninguno: solo `subscribed` |
+
+- **Públicos:** los sigue cualquier sesión, también la anónima. Nunca llevan datos de pasajeros:
+  `userId`, `holdId` y `bookingId` se quitan de los eventos a cualquier profundidad (`EventFanout`).
+- **Privado `usuario:{uuid}:tiquetes`:** aviso en vivo al comprador cuando booking emite su tiquete.
+  Un anónimo u otro usuario (ADMIN incluido) ⇒ `FORBIDDEN_TOPIC` sin cerrar la conexión. El `data`
+  lleva **solo** `bookingId`, `ticketId`, `itineraryId` y `seatNumbers` (nunca `qrCode` ni `userId`);
+  la app pide el tiquete completo con `GET /tickets/{ticketId}`.
+
+```js
+ws.send(JSON.stringify({ type: "subscribe", topic: `usuario:${userId}:tiquetes` }));
+// servidor → {"type":"event","topic":"usuario:…:tiquetes","event":"TicketIssued",
+//             "data":{"bookingId":…,"ticketId":…,"itineraryId":…,"seatNumbers":["5"]}}
+```
+
 Token inválido en `connect` ⇒ `INVALID_TOKEN` y cierre 4401 (en `?token=`, si está permitido, ⇒ 401
-en el handshake); token vencido ⇒ cierre 4401 (el cliente reconecta con uno nuevo).
-Nunca se reenvían datos de pasajeros: `userId`, `holdId` y `bookingId` se quitan de los eventos a
-cualquier profundidad (`EventFanout`).
+en el handshake); token vencido ⇒ cierre 4401 (el cliente reconecta con uno nuevo), también con
+temas privados suscritos.
 
 ### Seguimiento público
 
@@ -74,7 +95,8 @@ ws.send(JSON.stringify({ type: "subscribe", topic: `bus:${busId}:posicion` }));
   `viaje:{id}:eventos`, `oferta:{id}:cupo`, `itinerario:{id}:asientos`. Otro tema ⇒ error
   `FORBIDDEN_TOPIC` sin cerrar la conexión.
 - Máximo **5 suscripciones** a la vez (`tripbus.realtime.max-anonymous-subscriptions`); la sexta ⇒
-  `TOO_MANY_SUBSCRIPTIONS`. Las sesiones autenticadas siguen con `max-subscriptions` (20) y todos los temas.
+  `TOO_MANY_SUBSCRIPTIONS`. Las sesiones autenticadas siguen con `max-subscriptions` (20), los temas
+  públicos y su propio `usuario:{uuid}:tiquetes`.
 - Recibe el mismo snapshot y los mismos eventos que una sesión autenticada. Los snapshots se piden sin
   usuario (el mapa de asientos solo dice el estado de cada puesto, `propio` siempre `false`) y los
   eventos van sin ids de pasajeros ni de reservas.
@@ -237,6 +259,9 @@ mvn -B verify      # unitarias + integración con Redis real (Testcontainers: Do
 - `RealtimePublicoIT`: seguimiento público. Un anónimo (`connect` sin token) recibe snapshot y eventos
   de `bus:{id}:posicion`, sigue abierto pasados los 10 s del plazo de autenticación, no pasa de 5
   suscripciones y puede autenticarse después; un token inválido sigue cerrando con 4401.
+- `RealtimeTiquetesIT`: aviso privado de tiquete (US-033). El dueño recibe `TicketIssued` en
+  `usuario:{uuid}:tiquetes` sin `qrCode` ni `userId` y sin snapshot; otro usuario, un ADMIN y un
+  anónimo reciben `FORBIDDEN_TOPIC` sin que se cierre la conexión.
 
 Toda la plataforma: ver el README de **API-gateway**.
 
