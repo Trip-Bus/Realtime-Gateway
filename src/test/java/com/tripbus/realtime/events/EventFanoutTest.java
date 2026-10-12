@@ -43,7 +43,7 @@ class EventFanoutTest {
     void setUp() {
         meters = new SimpleMeterRegistry();
         registry = new SessionRegistry(meters);
-        RealtimeProperties properties = new RealtimeProperties(null, null, null, null, null, null, 0,
+        RealtimeProperties properties = new RealtimeProperties(null, null, null, null, null, null, 0, 0,
                 null, null, null, null, false);
         fanout = new EventFanout(mock(RedisConnectionFactory.class), mock(StringRedisTemplate.class), registry,
                 new ObjectMapper(), properties, meters);
@@ -125,5 +125,19 @@ class EventFanoutTest {
         verify(raw).sendMessage(captor.capture());
         assertThat(captor.getValue().getPayload()).contains("\"seat\":\"12\"").doesNotContain("privado");
         assertThat(delivered()).isEqualTo(1.0);
+    }
+
+    @Test
+    void topicosPublicosNoLlevanIdsDePasajerosNiReservasANingunaProfundidad() throws IOException {
+        var payload = new ObjectMapper().readTree("""
+                {"itineraryId":"i","seatNumbers":["7"],"userId":"u","holdId":"h","bookingId":"b",
+                 "payload":{"nota":"ok","userId":"u2","pasajeros":[{"userId":"u3","asiento":"9"}]}}""");
+
+        var limpio = EventFanout.sanitize(payload);
+
+        assertThat(limpio.toString()).doesNotContain("userId", "holdId", "bookingId")
+                .contains("\"seatNumbers\":[\"7\"]", "\"nota\":\"ok\"", "\"asiento\":\"9\"");
+        assertThat(payload.has("holdId")).as("no modifica el payload original").isTrue();
+        assertThat(EventFanout.sanitize(new ObjectMapper().readTree("\"texto\"")).asText()).isEqualTo("texto");
     }
 }

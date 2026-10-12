@@ -58,6 +58,8 @@ tripbus:
     heartbeat-timeout: 45s
     auth-timeout: 10s
     max-subscriptions: 20
+    # Seguimiento público (US-039): una conexión sin cuenta sigue solo temas públicos, hasta 5 a la vez.
+    max-anonymous-subscriptions: 5
     # Snapshots iniciales (lectura de los servicios dueños del dato).
     seat-inventory-url: ${SEAT_INVENTORY_URL:http://localhost:18003}
     flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:18006}

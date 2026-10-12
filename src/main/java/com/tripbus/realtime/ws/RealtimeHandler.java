@@ -26,6 +26,7 @@ import java.util.concurrent.Executors;
  * Protocolo (JSON por mensaje):
  * <pre>
  *  cliente → {"type":"connect","token":"JWT"}        (si no envió ?token= en la URL)
+ *  cliente → {"type":"connect"}                      (sin cuenta: solo temas públicos, US-039)
  *  cliente → {"type":"subscribe","topic":"itinerario:{id}:asientos"}
  *  cliente → {"type":"unsubscribe","topic":"..."}
  *  cliente → {"type":"ping"} | {"type":"pong"}
@@ -97,7 +98,7 @@ public class RealtimeHandler extends TextWebSocketHandler {
 
     private void connect(ClientSession session, String token) {
         if (token == null || token.isBlank()) {
-            sendError(session, "TOKEN_REQUIRED", "Debe enviar el token JWT");
+            connectAnonymously(session);
             return;
         }
         try {
@@ -121,9 +122,28 @@ public class RealtimeHandler extends TextWebSocketHandler {
         session.send(out.toString());
     }
 
+    /**
+     * Seguimiento público (US-039): connect sin token deja la sesión anónima. Solo puede seguir
+     * temas públicos y no tiene token que venza; una sesión ya autenticada no se degrada.
+     */
+    private void connectAnonymously(ClientSession session) {
+        if (session.authenticated()) {
+            sendError(session, "ALREADY_AUTHENTICATED", "La conexión ya está autenticada");
+            return;
+        }
+        session.connectAnonymously();
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("type", "connected");
+        out.put("anonymous", true);
+        out.put("heartbeatSeconds", properties.heartbeatInterval().toSeconds());
+        out.put("maxSubscriptions", properties.maxAnonymousSubscriptions());
+        session.send(out.toString());
+    }
+
     private void subscribe(ClientSession session, String rawTopic) {
-        if (!session.authenticated()) {
-            sendError(session, "UNAUTHENTICATED", "Primero envíe {\"type\":\"connect\",\"token\":...}");
+        if (!session.identified()) {
+            sendError(session, "UNAUTHENTICATED",
+                    "Primero envíe {\"type\":\"connect\"} (con \"token\" para una sesión autenticada)");
             return;
         }
         String topic = rawTopic == null ? null : rawTopic.trim().toLowerCase(Locale.ROOT);
@@ -132,8 +152,13 @@ public class RealtimeHandler extends TextWebSocketHandler {
             sendError(session, "INVALID_TOPIC", "Tópico inválido: " + rawTopic);
             return;
         }
-        if (!session.topics().contains(topic) && session.topics().size() >= properties.maxSubscriptions()) {
-            sendError(session, "TOO_MANY_SUBSCRIPTIONS", "Máximo " + properties.maxSubscriptions() + " suscripciones");
+        if (session.anonymous() && !Topics.isPublic(topic)) {
+            sendError(session, "FORBIDDEN_TOPIC", "Tópico no disponible sin cuenta: " + topic);
+            return;
+        }
+        int max = session.anonymous() ? properties.maxAnonymousSubscriptions() : properties.maxSubscriptions();
+        if (!session.topics().contains(topic) && session.topics().size() >= max) {
+            sendError(session, "TOO_MANY_SUBSCRIPTIONS", "Máximo " + max + " suscripciones");
             return;
         }
         // Se suscribe ANTES de pedir el snapshot para no perder eventos intermedios.
@@ -177,12 +202,15 @@ public class RealtimeHandler extends TextWebSocketHandler {
 
     // ------------------------------------------------------------------ heartbeat
 
-    /** Ping cada 20 s; si no hay respuesta en 45 s se cierra. Token vencido → reconectar. */
+    /**
+     * Ping cada 20 s; si no hay respuesta en 45 s se cierra. Token vencido → reconectar. Las
+     * sesiones anónimas no tienen token: solo las cierra la falta de heartbeat.
+     */
     @org.springframework.scheduling.annotation.Scheduled(fixedDelayString = "${tripbus.realtime.heartbeat-interval-ms:20000}")
     public void heartbeat() {
         Instant now = clock.instant();
         for (ClientSession session : registry.all()) {
-            if (!session.authenticated()) {
+            if (!session.identified()) {
                 if (session.connectedAt().plus(properties.authTimeout()).isBefore(now)) {
                     sendError(session, "AUTH_TIMEOUT", "No se recibió el token a tiempo");
                     session.close(UNAUTHORIZED);

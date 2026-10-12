@@ -32,11 +32,11 @@
 
         <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
              La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
-             Fijados con la medición del 2026-10-10 redondeada hacia abajo al 5 %: líneas 81,9 % -> 0.80;
-             ramas 78,2 % -> 0.75 (varía ~1 punto entre corridas según si el heartbeat programado
-             alcanza a ejecutarse durante RealtimeIT; ambos mínimos quedan por debajo). -->
-        <jacoco.minimo.lineas>0.80</jacoco.minimo.lineas>
-        <jacoco.minimo.ramas>0.75</jacoco.minimo.ramas>
+             Fijados con la medición del 2026-10-12 redondeada hacia abajo al 5 %: líneas 85,6 % -> 0.85;
+             ramas 84,0 % -> 0.80. El heartbeat programado ya corre siempre (RealtimeSinQueryTokenIT y
+             RealtimePublicoIT lo programan cada 200 ms), así que la medición varía menos entre corridas. -->
+        <jacoco.minimo.lineas>0.85</jacoco.minimo.lineas>
+        <jacoco.minimo.ramas>0.80</jacoco.minimo.ramas>
 
         <!-- SonarQube Cloud: el análisis lo lanza el CI solo en develop (push y PR con base develop)
              cuando existe el secreto SONAR_TOKEN. El plan Free analiza una única rama. -->
