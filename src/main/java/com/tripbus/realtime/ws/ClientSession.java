@@ -21,6 +21,7 @@ public class ClientSession {
     private final Instant connectedAt;
     private final Set<String> topics = ConcurrentHashMap.newKeySet();
     private volatile String userId;
+    private volatile boolean anonymous;
     private volatile String role;
     private volatile Instant tokenExpiresAt;
     private volatile Instant lastSeen;
@@ -40,7 +41,22 @@ public class ClientSession {
         return userId != null;
     }
 
+    /** Sesión sin cuenta (seguimiento público, US-039): solo temas públicos y sin token que venza. */
+    public boolean anonymous() {
+        return anonymous;
+    }
+
+    /** Ya se identificó, con token o como anónima: el plazo de autenticación no la cierra. */
+    public boolean identified() {
+        return authenticated() || anonymous;
+    }
+
+    public void connectAnonymously() {
+        this.anonymous = true;
+    }
+
     public void authenticate(String userId, String role, Instant expiresAt) {
+        this.anonymous = false;
         this.userId = userId;
         this.role = role;
         this.tokenExpiresAt = expiresAt;

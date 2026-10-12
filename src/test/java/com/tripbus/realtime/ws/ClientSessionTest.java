@@ -72,4 +72,21 @@ class ClientSessionTest {
         assertThat(session.send("{}")).isFalse();
         verify(raw).close(CloseStatus.SESSION_NOT_RELIABLE);
     }
+
+    @Test
+    void sesionAnonimaQuedaIdentificadaYAlAutenticarseDejaDeSerAnonima() {
+        ClientSession session = new ClientSession(raw("anon", true), Instant.now());
+        assertThat(session.identified()).isFalse();
+
+        session.connectAnonymously();
+        assertThat(session.anonymous()).isTrue();
+        assertThat(session.authenticated()).isFalse();
+        assertThat(session.identified()).isTrue();
+        assertThat(session.tokenExpiresAt()).isNull();
+
+        session.authenticate("u", "PASAJERO", Instant.now().plusSeconds(60));
+        assertThat(session.anonymous()).isFalse();
+        assertThat(session.authenticated()).isTrue();
+        assertThat(session.identified()).isTrue();
+    }
 }

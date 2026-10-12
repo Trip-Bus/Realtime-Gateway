@@ -2,7 +2,9 @@ package com.tripbus.realtime.ws;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -26,6 +28,13 @@ public final class Topics {
     public record Parsed(Kind kind, UUID id) {
     }
 
+    /**
+     * Tipos de tópico que puede seguir una sesión anónima (US-039, US-047, US-056): quien espera
+     * el bus en la vía no tiene cuenta. Sus payloads no llevan datos personales (EventFanout
+     * quita los identificadores de pasajeros y de reservas).
+     */
+    private static final Set<Kind> PUBLIC_KINDS = EnumSet.of(Kind.POSICION, Kind.EVENTOS, Kind.CUPO, Kind.ASIENTOS);
+
     private Topics() {
     }
 
@@ -48,6 +57,12 @@ public final class Topics {
             default -> null;
         };
         return kind == null ? null : new Parsed(kind, UUID.fromString(m.group(2)));
+    }
+
+    /** true si el tópico es válido y lo puede seguir una sesión anónima. */
+    public static boolean isPublic(String topic) {
+        Parsed parsed = parse(topic);
+        return parsed != null && PUBLIC_KINDS.contains(parsed.kind());
     }
 
     /** Tópicos a los que se difunde un evento de dominio. */

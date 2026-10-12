@@ -34,4 +34,15 @@ class TopicsTest {
         assertThat(Topics.forEvent("PositionUpdated", pos)).containsExactly("bus:" + id + ":posicion");
         assertThat(Topics.forEvent("BookingCreated", seat)).isEmpty();
     }
+
+    @Test
+    void losCuatroTiposDeTopicoSonPublicosYLosInvalidosNo() {
+        UUID id = UUID.randomUUID();
+        assertThat(Topics.isPublic("bus:" + id + ":posicion")).isTrue();
+        assertThat(Topics.isPublic("viaje:" + id + ":eventos")).isTrue();
+        assertThat(Topics.isPublic("oferta:" + id + ":cupo")).isTrue();
+        assertThat(Topics.isPublic("itinerario:" + id + ":asientos")).isTrue();
+        assertThat(Topics.isPublic("bus:" + id + ":asientos")).isFalse();
+        assertThat(Topics.isPublic(null)).isFalse();
+    }
 }

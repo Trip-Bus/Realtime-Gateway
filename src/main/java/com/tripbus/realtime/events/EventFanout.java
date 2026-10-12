@@ -2,6 +2,7 @@ package com.tripbus.realtime.events;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.tripbus.realtime.config.RealtimeProperties;
 import com.tripbus.realtime.ws.ClientSession;
@@ -29,13 +30,14 @@ import java.util.Set;
 /**
  * Lee TODOS los eventos del bus (sin consumer group: cada réplica recibe todo, como un
  * Pub/Sub) y los difunde a las conexiones suscritas al tópico correspondiente (US-021,
- * US-047, US-056). Nunca reenvía el userId de otros pasajeros.
+ * US-047, US-056). Los tópicos son públicos (US-039: los siguen también sesiones anónimas), así
+ * que nunca reenvía datos de un pasajero: ni su userId ni los ids de su retención o reserva.
  */
 @Component
 public class EventFanout implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(EventFanout.class);
-    private static final Set<String> PRIVATE_FIELDS = Set.of("userId");
+    private static final Set<String> PRIVATE_FIELDS = Set.of("userId", "holdId", "bookingId");
 
     private final RedisConnectionFactory connectionFactory;
     private final StringRedisTemplate redis;
@@ -136,18 +138,27 @@ public class EventFanout implements SmartLifecycle {
         registry.remove(session.id());
     }
 
-    private static JsonNode sanitize(JsonNode payload) {
-        if (payload instanceof ObjectNode object) {
-            ObjectNode copy = object.deepCopy();
-            Iterator<String> names = copy.fieldNames();
-            while (names.hasNext()) {
-                if (PRIVATE_FIELDS.contains(names.next())) {
-                    names.remove();
+    /** Copia sin campos privados a cualquier profundidad (p. ej. el detalle libre de TripEventReported). */
+    static JsonNode sanitize(JsonNode payload) {
+        JsonNode copy = payload.deepCopy();
+        strip(copy);
+        return copy;
+    }
+
+    private static void strip(JsonNode node) {
+        if (node instanceof ObjectNode object) {
+            Iterator<Map.Entry<String, JsonNode>> fields = object.properties().iterator();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                if (PRIVATE_FIELDS.contains(field.getKey())) {
+                    fields.remove();
+                } else {
+                    strip(field.getValue());
                 }
             }
-            return copy;
+        } else if (node instanceof ArrayNode array) {
+            array.forEach(EventFanout::strip);
         }
-        return payload;
     }
 
     @Override

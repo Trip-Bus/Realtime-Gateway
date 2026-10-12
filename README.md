@@ -7,7 +7,7 @@ envía el snapshot inicial y difunde los eventos. **No tiene lógica de negocio 
 
 **Stack:** Java 21 · Spring Boot 3.5.16 · Redis 7
 
-**HU:** US-020, US-021, US-047 (parte), US-056 (parte) · **Puerto:** 18007 · **BD:** ninguna (solo Redis)
+**HU:** US-020, US-021, US-039 (seguimiento público), US-047 (parte), US-056 (parte) · **Puerto:** 18007 · **BD:** ninguna (solo Redis)
 
 ## Protocolo
 
@@ -26,7 +26,8 @@ ws.onopen = () => ws.send(JSON.stringify({ type: "connect", token: jwt }));
 ```
 
 Si no llega un `connect` válido en 10 s, el servidor envía `{"type":"error","code":"AUTH_TIMEOUT"}`
-y cierra con 4401; cualquier `subscribe` antes de autenticarse responde `UNAUTHENTICATED`.
+y cierra con 4401; cualquier `subscribe` antes del `connect` responde `UNAUTHENTICATED`. Sin cuenta
+se manda `connect` sin token: ver [Seguimiento público](#seguimiento-público).
 
 **`?token=<JWT>` en la URL (heredado, solo IDE y QA):** un token en la URL queda en logs, historial
 del navegador y proxies, así que se controla con `WS_ALLOW_QUERY_TOKEN`
@@ -53,7 +54,34 @@ ruta). Detrás del gateway, la autenticación depende solo del JWT y el `Origin`
 Tópicos: `itinerario:{id}:asientos`, `oferta:{id}:cupo`, `viaje:{id}:eventos`, `bus:{id}:posicion`.
 Token inválido en `connect` ⇒ `INVALID_TOKEN` y cierre 4401 (en `?token=`, si está permitido, ⇒ 401
 en el handshake); token vencido ⇒ cierre 4401 (el cliente reconecta con uno nuevo).
-Nunca se reenvía el `userId` de otros pasajeros.
+Nunca se reenvían datos de pasajeros: `userId`, `holdId` y `bookingId` se quitan de los eventos a
+cualquier profundidad (`EventFanout`).
+
+### Seguimiento público
+
+Decisión de producto (US-039, US-047, US-056): seguir el bus no exige cuenta, porque sirve a quien lo
+espera en la vía. Se abre `/ws` y se manda `connect` **sin token** (o con `"token":""`):
+
+```js
+ws.onopen = () => ws.send(JSON.stringify({ type: "connect" }));
+// servidor → {"type":"connected","anonymous":true,"heartbeatSeconds":20,"maxSubscriptions":5}
+ws.send(JSON.stringify({ type: "subscribe", topic: `bus:${busId}:posicion` }));
+```
+
+- La sesión anónima no se cierra por `AUTH_TIMEOUT` ni por vencimiento de token (no tiene); sí por
+  falta de heartbeat (4408), como cualquier otra.
+- Solo puede suscribirse a **temas públicos** (`Topics.isPublic`): `bus:{id}:posicion`,
+  `viaje:{id}:eventos`, `oferta:{id}:cupo`, `itinerario:{id}:asientos`. Otro tema ⇒ error
+  `FORBIDDEN_TOPIC` sin cerrar la conexión.
+- Máximo **5 suscripciones** a la vez (`tripbus.realtime.max-anonymous-subscriptions`); la sexta ⇒
+  `TOO_MANY_SUBSCRIPTIONS`. Las sesiones autenticadas siguen con `max-subscriptions` (20) y todos los temas.
+- Recibe el mismo snapshot y los mismos eventos que una sesión autenticada. Los snapshots se piden sin
+  usuario (el mapa de asientos solo dice el estado de cada puesto, `propio` siempre `false`) y los
+  eventos van sin ids de pasajeros ni de reservas.
+- Un `connect` con token inválido sigue respondiendo `INVALID_TOKEN` y cerrando con 4401. Un anónimo
+  puede autenticarse después enviando `connect` con token; una sesión ya autenticada no se degrada
+  (`connect` sin token ⇒ `ALREADY_AUTHENTICATED`). `allow-query-token` no cambia: `?token=` sigue
+  igual que arriba.
 
 Cada réplica lee **todos** los eventos de `tripbus:events` (Redis Streams) y los entrega a sus
 propias conexiones, así que escala horizontalmente sin sticky sessions.
@@ -206,6 +234,9 @@ mvn -B verify      # unitarias + integración con Redis real (Testcontainers: Do
   Streams (sin exponer `userId`), el ping y el rechazo de tokens y tópicos inválidos.
 - `RealtimeSinQueryTokenIT`: como PROD (`allow-query-token=false`): `?token=` sin `connect` se cierra
   al vencer el plazo, y `connect` sin token en la URL queda autenticado.
+- `RealtimePublicoIT`: seguimiento público. Un anónimo (`connect` sin token) recibe snapshot y eventos
+  de `bus:{id}:posicion`, sigue abierto pasados los 10 s del plazo de autenticación, no pasa de 5
+  suscripciones y puede autenticarse después; un token inválido sigue cerrando con 4401.
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -223,10 +254,10 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-10-10) | Mínimo |
+| Métrica | Medido (2026-10-12) | Mínimo |
 |---|---|---|
-| Líneas | 81,9 % | `jacoco.minimo.lineas` = 0.80 |
-| Ramas | 78,2 % | `jacoco.minimo.ramas` = 0.75 |
+| Líneas | 85,6 % | `jacoco.minimo.lineas` = 0.85 |
+| Ramas | 84,0 % | `jacoco.minimo.ramas` = 0.80 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y
