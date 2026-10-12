@@ -156,6 +156,11 @@ public class RealtimeHandler extends TextWebSocketHandler {
             sendError(session, "FORBIDDEN_TOPIC", "Tópico no disponible sin cuenta: " + topic);
             return;
         }
+        // Tema privado (US-033): solo su dueño, sin excepción por rol.
+        if (parsed.kind() == Topics.Kind.TIQUETES && !Topics.isOwnedBy(parsed, session.userId())) {
+            sendError(session, "FORBIDDEN_TOPIC", "Tópico de otro usuario: " + topic);
+            return;
+        }
         int max = session.anonymous() ? properties.maxAnonymousSubscriptions() : properties.maxSubscriptions();
         if (!session.topics().contains(topic) && session.topics().size() >= max) {
             sendError(session, "TOO_MANY_SUBSCRIPTIONS", "Máximo " + max + " suscripciones");
@@ -164,6 +169,9 @@ public class RealtimeHandler extends TextWebSocketHandler {
         // Se suscribe ANTES de pedir el snapshot para no perder eventos intermedios.
         registry.subscribe(session, topic);
         session.send(objectMapper.createObjectNode().put("type", "subscribed").put("topic", topic).toString());
+        if (!parsed.kind().hasSnapshot()) {
+            return;
+        }
         snapshotExecutor.submit(() -> {
             ObjectNode out = objectMapper.createObjectNode();
             out.put("type", "snapshot");

@@ -48,6 +48,8 @@ public class SnapshotService {
                 case CUPO -> flashOffers.get().uri("/offers/{id}/quota", topic.id()).retrieve().body(JsonNode.class);
                 case EVENTOS -> fleet.get().uri("/trips/{id}/timeline", topic.id()).retrieve().body(JsonNode.class);
                 case POSICION -> fleet.get().uri("/buses/{id}/position", topic.id()).retrieve().body(JsonNode.class);
+                // Sin snapshot (Kind.hasSnapshot): RealtimeHandler no lo pide.
+                case TIQUETES -> com.fasterxml.jackson.databind.node.NullNode.getInstance();
             };
             return Optional.ofNullable(data);
         } catch (HttpClientErrorException.NotFound e) {
