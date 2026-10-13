@@ -84,7 +84,8 @@ class ClientSessionTest {
         assertThat(session.identified()).isTrue();
         assertThat(session.tokenExpiresAt()).isNull();
 
-        session.authenticate("u", "PASAJERO", Instant.now().plusSeconds(60));
+        session.authenticate("u", "jti-1", "PASAJERO", Instant.now().plusSeconds(60));
+        assertThat(session.jti()).isEqualTo("jti-1");
         assertThat(session.anonymous()).isFalse();
         assertThat(session.authenticated()).isTrue();
         assertThat(session.identified()).isTrue();

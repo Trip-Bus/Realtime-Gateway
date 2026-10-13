@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.tripbus.realtime.config.RealtimeProperties;
+import com.tripbus.realtime.events.EventFanout;
 import com.tripbus.realtime.snapshot.SnapshotService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +33,7 @@ import java.util.concurrent.Executors;
  *  cliente → {"type":"ping"} | {"type":"pong"}
  *  servidor → connected | subscribed | snapshot | event | unsubscribed | ping | pong | error
  * </pre>
+ * Cada event lleva seq (id de la entrada del stream) y cada snapshot asOfSeq: ver README.
  * No tiene lógica de negocio: solo autentica, gestiona suscripciones y transporta.
  */
 @Component
@@ -47,16 +49,21 @@ public class RealtimeHandler extends TextWebSocketHandler {
     private final JwtDecoder jwtDecoder;
     private final ObjectMapper objectMapper;
     private final RealtimeProperties properties;
+    private final TokenRevocations revocations;
+    private final EventFanout fanout;
     private final Clock clock = Clock.systemUTC();
     private final ExecutorService snapshotExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public RealtimeHandler(SessionRegistry registry, SnapshotService snapshots, JwtDecoder jwtDecoder,
-                           ObjectMapper objectMapper, RealtimeProperties properties) {
+                           ObjectMapper objectMapper, RealtimeProperties properties, TokenRevocations revocations,
+                           EventFanout fanout) {
         this.registry = registry;
         this.snapshots = snapshots;
         this.jwtDecoder = jwtDecoder;
         this.objectMapper = objectMapper;
         this.properties = properties;
+        this.revocations = revocations;
+        this.fanout = fanout;
     }
 
     @Override
@@ -109,8 +116,19 @@ public class RealtimeHandler extends TextWebSocketHandler {
         }
     }
 
+    /**
+     * Token revocado por logout (US-006) ⇒ UNAUTHENTICATED y cierre 4401. La sesión guarda el jti
+     * ANTES de consultar la revocación: un SessionRevoked que llegue entre la consulta y el registro
+     * igual la encuentra (identity guarda la clave antes de publicar el evento).
+     */
     private void authenticate(ClientSession session, Jwt jwt) {
-        session.authenticate(jwt.getSubject(), jwt.getClaimAsString("role"), jwt.getExpiresAt());
+        session.authenticate(jwt.getSubject(), jwt.getId(), jwt.getClaimAsString("role"), jwt.getExpiresAt());
+        if (revocations.isRevoked(jwt.getId())) {
+            sendError(session, "UNAUTHENTICATED", "La sesión fue cerrada; inicie sesión de nuevo");
+            session.close(UNAUTHORIZED);
+            registry.remove(session.id());
+            return;
+        }
         ObjectNode out = objectMapper.createObjectNode();
         out.put("type", "connected");
         out.put("userId", jwt.getSubject());
@@ -172,10 +190,13 @@ public class RealtimeHandler extends TextWebSocketHandler {
         if (!parsed.kind().hasSnapshot()) {
             return;
         }
+        // Lo difundido hasta aquí ya está en el snapshot: el cliente ignora los event con seq <= asOfSeq.
+        String asOfSeq = fanout.lastSeq();
         snapshotExecutor.submit(() -> {
             ObjectNode out = objectMapper.createObjectNode();
             out.put("type", "snapshot");
             out.put("topic", topic);
+            out.put("asOfSeq", asOfSeq);
             snapshots.snapshot(parsed).ifPresentOrElse(
                     data -> out.set("data", data),
                     () -> {

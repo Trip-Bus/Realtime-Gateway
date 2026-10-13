@@ -48,7 +48,7 @@ ruta). Detrás del gateway, la autenticación depende solo del JWT y el `Origin`
 | Cliente → servidor | Servidor → cliente |
 |---|---|
 | `{"type":"subscribe","topic":"itinerario:{id}:asientos"}` | `subscribed`, luego `snapshot` con el estado actual |
-| `{"type":"unsubscribe","topic":"..."}` | `event` con `{topic, event, eventId, data}` |
+| `{"type":"unsubscribe","topic":"..."}` | `event` con `{topic, event, seq, eventId, data}` (`snapshot` lleva `asOfSeq`) |
 | `{"type":"ping"}` / `{"type":"pong"}` | `ping` cada 20 s (sin respuesta en 45 s ⇒ se cierra con 4408) |
 
 #### Tópicos
@@ -77,6 +77,37 @@ ws.send(JSON.stringify({ type: "subscribe", topic: `usuario:${userId}:tiquetes` 
 Token inválido en `connect` ⇒ `INVALID_TOKEN` y cierre 4401 (en `?token=`, si está permitido, ⇒ 401
 en el handshake); token vencido ⇒ cierre 4401 (el cliente reconecta con uno nuevo), también con
 temas privados suscritos.
+
+**Tokens revocados (US-006):** la firma no basta. Al autenticar (`connect` o `?token=` si está
+permitido) el gateway consulta `tripbus:revoked:{jti}` en Redis (la escribe identity al cerrar sesión,
+con TTL); si existe ⇒ `{"type":"error","code":"UNAUTHENTICATED"}` y cierre 4401. Si Redis no responde
+se permite la conexión con un WARN en el log (la expiración del token sigue protegiendo). Con la
+sesión abierta, el evento `SessionRevoked {jti, userId}` cierra con 4401 las conexiones de ese `jti`
+(las de otros tokens del mismo usuario siguen abiertas) y `UserSuspended {userId}` todas las de ese
+usuario. Estos eventos no se reenvían a ningún tema y no afectan a las sesiones anónimas.
+
+### Orden de los eventos (`seq` y `asOfSeq`)
+
+Cada `event` lleva `seq`: el id de su entrada en el stream de Redis (`"<ms>-<n>"`, p. ej.
+`"1760280000000-3"`), monótono en todo el bus. Cada `snapshot` lleva `asOfSeq`: el último `seq` que
+el gateway había difundido cuando pidió ese snapshot (`"0-0"` si aún no había difundido nada). Para
+compararlos se separan por `-` y se comparan numéricamente primero los milisegundos y luego `n`
+(no como texto).
+
+El cliente debe:
+
+1. **Ignorar todo `event` con `seq <= asOfSeq`:** ese cambio ya está incluido en el snapshot (el tema
+   se suscribe antes de pedirlo, así que puede llegar un evento antes que el snapshot o repetido).
+2. **Si detecta un salto** (un `seq` que no es mayor que el último aplicado, o la conexión se cortó y
+   pudo perder eventos), **volver a pedir el snapshot**: `unsubscribe` y `subscribe` del tema, y aplicar
+   de nuevo la regla 1 con el `asOfSeq` nuevo.
+
+```js
+const after = (a, b) => { const [am, an] = a.split("-").map(Number), [bm, bn] = b.split("-").map(Number);
+                          return am !== bm ? am > bm : an > bn; };
+// snapshot → estado = data; ultimo = asOfSeq
+// event    → if (!after(seq, ultimo)) return; aplicar(data); ultimo = seq;
+```
 
 ### Seguimiento público
 
@@ -250,7 +281,7 @@ mvn -B verify      # unitarias + integración con Redis real (Testcontainers: Do
 
 - `*Test` / `*Tests`: unitarias (`TopicsTest`, `RequiredSecretsCheckTest`, `RequestIdFilterTest`,
   `RequestIdPropagationInterceptorTest`, `ClientSessionTest`, `EventFanoutTest`,
-  `HandshakeAuthInterceptorTest`, `PerfilesConfigTest`).
+  `HandshakeAuthInterceptorTest`, `TokenRevocationsTest`, `PerfilesConfigTest`).
 - `RealtimeIT`: levanta Redis 7 con Testcontainers y prueba de extremo a extremo la conexión
   autenticada con `?token=` (`allow-query-token=true`), el snapshot inicial, la difusión desde Redis
   Streams (sin exponer `userId`), el ping y el rechazo de tokens y tópicos inválidos.
@@ -262,6 +293,11 @@ mvn -B verify      # unitarias + integración con Redis real (Testcontainers: Do
 - `RealtimeTiquetesIT`: aviso privado de tiquete (US-033). El dueño recibe `TicketIssued` en
   `usuario:{uuid}:tiquetes` sin `qrCode` ni `userId` y sin snapshot; otro usuario, un ADMIN y un
   anónimo reciben `FORBIDDEN_TOPIC` sin que se cierre la conexión.
+- `RealtimeRevocacionIT`: tokens revocados y orden (US-006). Un token con `tripbus:revoked:{jti}` se
+  cierra con 4401 al conectar; `SessionRevoked` cierra solo la sesión de ese `jti` (otro token del
+  mismo usuario y los anónimos siguen abiertos) y `UserSuspended` todas las del usuario; los eventos
+  llevan `seq` creciente y el snapshot `asOfSeq`. Redis caído al consultar la revocación (permite la
+  conexión con WARN) está en `TokenRevocationsTest`.
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -281,8 +317,8 @@ Toda la plataforma: ver el README de **API-gateway**.
 
 | Métrica | Medido (2026-10-12) | Mínimo |
 |---|---|---|
-| Líneas | 85,6 % | `jacoco.minimo.lineas` = 0.85 |
-| Ramas | 84,0 % | `jacoco.minimo.ramas` = 0.80 |
+| Líneas | 88,3 % | `jacoco.minimo.lineas` = 0.85 |
+| Ramas | 88,7 % | `jacoco.minimo.ramas` = 0.85 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y

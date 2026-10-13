@@ -21,6 +21,7 @@ public class ClientSession {
     private final Instant connectedAt;
     private final Set<String> topics = ConcurrentHashMap.newKeySet();
     private volatile String userId;
+    private volatile String jti;
     private volatile boolean anonymous;
     private volatile String role;
     private volatile Instant tokenExpiresAt;
@@ -55,9 +56,10 @@ public class ClientSession {
         this.anonymous = true;
     }
 
-    public void authenticate(String userId, String role, Instant expiresAt) {
+    public void authenticate(String userId, String jti, String role, Instant expiresAt) {
         this.anonymous = false;
         this.userId = userId;
+        this.jti = jti;
         this.role = role;
         this.tokenExpiresAt = expiresAt;
     }
@@ -106,6 +108,11 @@ public class ClientSession {
 
     public String userId() {
         return userId;
+    }
+
+    /** Id del token con el que se autenticó (claim jti); null si es anónima o el token no lo trae. */
+    public String jti() {
+        return jti;
     }
 
     public String role() {

@@ -19,15 +19,19 @@ import org.springframework.web.socket.handler.SessionLimitExceededException;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -35,6 +39,7 @@ class EventFanoutTest {
 
     private final UUID itinerary = UUID.randomUUID();
     private final String topic = "itinerario:" + itinerary + ":asientos";
+    private final Map<ClientSession, WebSocketSession> raws = new HashMap<>();
     private SimpleMeterRegistry meters;
     private SessionRegistry registry;
     private EventFanout fanout;
@@ -171,5 +176,85 @@ class EventFanoutTest {
     void elAvisoDeTiqueteOmiteLosCamposQueNoVienen() throws IOException {
         var data = EventFanout.data("TicketIssued", new ObjectMapper().readTree("{\"ticketId\":\"t1\",\"qrCode\":\"q\"}"));
         assertThat(data.toString()).isEqualTo("{\"ticketId\":\"t1\"}");
+    }
+
+    private ClientSession authenticated(String id, String userId, String jti) {
+        WebSocketSession raw = raw(id);
+        ClientSession session = new ClientSession(raw, Instant.now());
+        raws.put(session, raw);
+        session.authenticate(userId, jti, "PASAJERO", Instant.now().plusSeconds(60));
+        register(session);
+        return session;
+    }
+
+    private static MapRecord<String, String, String> record(String id, String type, String payload) {
+        return StreamRecords.newRecord().in("tripbus:events").withId(id).ofMap(Map.of(
+                "type", type, "eventId", UUID.randomUUID().toString(),
+                "occurredAt", Instant.now().toString(), "payload", payload));
+    }
+
+    @Test
+    void cadaEventoLlevaElIdDelStreamComoSeqYAvanzaLastSeq() throws IOException {
+        WebSocketSession raw = raw("uno");
+        register(new ClientSession(raw, Instant.now()));
+        assertThat(fanout.lastSeq()).isEqualTo("0-0");
+
+        fanout.onEvent(record("100-0", "SeatHeld", "{\"itineraryId\":\"" + itinerary + "\"}"));
+        fanout.onEvent(record("100-1", "SeatReleased", "{\"itineraryId\":\"" + itinerary + "\"}"));
+        // Los que no se difunden (sin tipo o sin suscriptores) también avanzan la posición.
+        fanout.onEvent(StreamRecords.newRecord().in("tripbus:events").withId("101-0").ofMap(Map.of("x", "y")));
+
+        var captor = ArgumentCaptor.forClass(TextMessage.class);
+        verify(raw, times(2)).sendMessage(captor.capture());
+        ObjectMapper mapper = new ObjectMapper();
+        assertThat(mapper.readTree(captor.getAllValues().get(0).getPayload()).path("seq").asText()).isEqualTo("100-0");
+        assertThat(mapper.readTree(captor.getAllValues().get(1).getPayload()).path("seq").asText()).isEqualTo("100-1");
+        assertThat(fanout.lastSeq()).isEqualTo("101-0");
+    }
+
+    @Test
+    void sessionRevokedCierraSoloLasSesionesDeEseJtiSinReenviarlo() throws IOException {
+        ClientSession revoked = authenticated("revocada", "u1", "j1");
+        ClientSession otherToken = authenticated("otro-token", "u1", "j2");
+        WebSocketSession anonymousRaw = raw("anonima");
+        ClientSession anonymous = new ClientSession(anonymousRaw, Instant.now());
+        anonymous.connectAnonymously();
+        register(anonymous);
+
+        fanout.onEvent(record("200-0", "SessionRevoked", "{\"jti\":\"j1\",\"userId\":\"u1\"}"));
+
+        var captor = ArgumentCaptor.forClass(TextMessage.class);
+        WebSocketSession revokedRaw = raws.get(revoked);
+        verify(revokedRaw).sendMessage(captor.capture());
+        assertThat(captor.getValue().getPayload()).contains("UNAUTHENTICATED");
+        verify(revokedRaw).close(argThat(s -> s.getCode() == 4401));
+        assertThat(registry.get("revocada")).isNull();
+        assertThat(registry.get("otro-token")).isSameAs(otherToken);
+        assertThat(registry.get("anonima")).isSameAs(anonymous);
+        verify(raws.get(otherToken), never()).sendMessage(any());
+        verify(anonymousRaw, never()).sendMessage(any());
+        assertThat(delivered()).isZero();
+        assertThat(fanout.lastSeq()).isEqualTo("200-0");
+    }
+
+    @Test
+    void userSuspendedCierraTodasLasSesionesDelUsuario() {
+        authenticated("a", "u1", "j1");
+        authenticated("b", "u1", "j2");
+        ClientSession other = authenticated("c", "u2", "j3");
+
+        fanout.onEvent(record("300-0", "UserSuspended", "{\"userId\":\"u1\"}"));
+
+        assertThat(registry.all()).containsExactly(other);
+    }
+
+    @Test
+    void revocacionSinIdentificadorNoCierraNada() {
+        authenticated("a", "u1", "j1");
+
+        fanout.onEvent(record("400-0", "SessionRevoked", "{\"userId\":\"u1\"}"));
+        fanout.onEvent(record("400-1", "UserSuspended", "{\"userId\":\" \"}"));
+
+        assertThat(registry.get("a")).isNotNull();
     }
 }
