@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.tripbus.realtime.config.RealtimeProperties;
 import com.tripbus.realtime.ws.ClientSession;
+import com.tripbus.realtime.ws.RealtimeHandler;
 import com.tripbus.realtime.ws.SessionRegistry;
 import com.tripbus.realtime.ws.Topics;
 import io.micrometer.core.instrument.Counter;
@@ -42,6 +43,7 @@ public class EventFanout implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(EventFanout.class);
     private static final Set<String> PRIVATE_FIELDS = Set.of("userId", "holdId", "bookingId");
     private static final List<String> TICKET_NOTICE_FIELDS = List.of("bookingId", "ticketId", "itineraryId", "seatNumbers");
+    private static final Set<String> REVOCATIONS = Set.of("SessionRevoked", "UserSuspended");
 
     private final RedisConnectionFactory connectionFactory;
     private final StringRedisTemplate redis;
@@ -51,6 +53,7 @@ public class EventFanout implements SmartLifecycle {
     private final Counter delivered;
     private StreamMessageListenerContainer<String, MapRecord<String, String, String>> container;
     private volatile boolean running;
+    private volatile String lastSeq = "0-0";
 
     public EventFanout(RedisConnectionFactory connectionFactory, StringRedisTemplate redis, SessionRegistry registry,
                        ObjectMapper objectMapper, RealtimeProperties properties, MeterRegistry meterRegistry) {
@@ -72,8 +75,9 @@ public class EventFanout implements SmartLifecycle {
         // Se parte del último id existente y luego el contenedor avanza id por id. (Con
         // ReadOffset.latest() cada lectura usaría "$" y se perderían eventos que llegan
         // casi al mismo tiempo, p. ej. SeatStateChanged + SeatHeld de una misma retención.)
+        lastSeq = currentLastId();
         var request = StreamMessageListenerContainer.StreamReadRequest
-                .builder(StreamOffset.create(properties.eventsStream(), ReadOffset.from(currentLastId())))
+                .builder(StreamOffset.create(properties.eventsStream(), ReadOffset.from(lastSeq)))
                 .cancelOnError(t -> false)
                 .errorHandler(t -> log.warn("Error leyendo eventos: {}", t.getMessage()))
                 .build();
@@ -97,7 +101,23 @@ public class EventFanout implements SmartLifecycle {
         return "0-0";
     }
 
+    /**
+     * Id de la última entrada del stream ya difundida (US-006): el snapshot lo lleva como asOfSeq.
+     * "0-0" antes de arrancar o con el stream vacío.
+     */
+    public String lastSeq() {
+        return lastSeq;
+    }
+
     void onEvent(MapRecord<String, String, String> record) {
+        try {
+            fanOut(record);
+        } finally {
+            lastSeq = record.getId().getValue();
+        }
+    }
+
+    private void fanOut(MapRecord<String, String, String> record) {
         Map<String, String> fields = record.getValue();
         String type = fields.get("type");
         if (type == null) {
@@ -105,6 +125,10 @@ public class EventFanout implements SmartLifecycle {
         }
         try {
             JsonNode payload = objectMapper.readTree(fields.getOrDefault("payload", "{}"));
+            if (REVOCATIONS.contains(type)) {
+                revoke(type, payload);
+                return;
+            }
             for (String topic : Topics.forEvent(type, payload)) {
                 Set<ClientSession> subscribers = registry.subscribers(topic);
                 if (subscribers.isEmpty()) {
@@ -114,6 +138,7 @@ public class EventFanout implements SmartLifecycle {
                 out.put("type", "event");
                 out.put("topic", topic);
                 out.put("event", type);
+                out.put("seq", record.getId().getValue());
                 out.put("eventId", fields.get("eventId"));
                 out.put("occurredAt", fields.get("occurredAt"));
                 out.set("data", data(type, payload));
@@ -124,6 +149,28 @@ public class EventFanout implements SmartLifecycle {
             }
         } catch (Exception e) {
             log.warn("Evento {} no difundido: {}", type, e.getMessage());
+        }
+    }
+
+    /**
+     * Logout o suspensión publicados por identity (US-006): cierra con 4401 las sesiones de ese token
+     * (SessionRevoked, por jti) o de ese usuario (UserSuspended, por userId). No se reenvían a ningún
+     * tema y las sesiones anónimas no se tocan.
+     */
+    private void revoke(String type, JsonNode payload) {
+        boolean byToken = "SessionRevoked".equals(type);
+        String value = payload.path(byToken ? "jti" : "userId").asText(null);
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        for (ClientSession session : registry.all()) {
+            String current = byToken ? session.jti() : session.userId();
+            if (session.authenticated() && value.equals(current)) {
+                session.send(objectMapper.createObjectNode().put("type", "error").put("code", "UNAUTHENTICATED")
+                        .put("message", "La sesión fue cerrada; inicie sesión de nuevo").toString());
+                session.close(RealtimeHandler.UNAUTHORIZED);
+                registry.remove(session.id());
+            }
         }
     }
 
