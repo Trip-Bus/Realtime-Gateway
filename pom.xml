@@ -32,8 +32,8 @@
 
         <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
              La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
-             Fijados con la medición del 2026-10-12 (US-033) redondeada hacia abajo al 5 %: líneas 87,0 % -> 0.85;
-             ramas 86,7 % -> 0.85. El heartbeat programado ya corre siempre (RealtimeSinQueryTokenIT y
+             Fijados con la medición del 2026-10-12 (US-006) redondeada hacia abajo al 5 %: líneas 88,3 % -> 0.85;
+             ramas 88,7 % -> 0.85. El heartbeat programado ya corre siempre (RealtimeSinQueryTokenIT y
              RealtimePublicoIT lo programan cada 200 ms), así que la medición varía menos entre corridas. -->
         <jacoco.minimo.lineas>0.85</jacoco.minimo.lineas>
         <jacoco.minimo.ramas>0.85</jacoco.minimo.ramas>
