@@ -5,21 +5,24 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.tripbus.realtime.snapshot.SnapshotService;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.data.redis.connection.stream.StreamRecords;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtException;
-import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.client.standard.StandardWebSocketClient;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.net.URI;
 import java.time.Instant;
@@ -35,22 +38,32 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
-/** US-020/US-021: conexión autenticada, snapshot inicial y difusión en vivo (Redis real). */
-@EnabledIfEnvironmentVariable(named = "TRIPBUS_IT", matches = "true")
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@TestPropertySource(properties = "EVENTS_STREAM=tripbus:events:realtime-test")
+/**
+ * US-020/US-021: conexión autenticada, snapshot inicial y difusión en vivo contra Redis 7 real
+ * (Testcontainers, requiere Docker). identity y los servicios de snapshot se simulan con mocks.
+ * Con allow-query-token=true (IDE/QA) se autentica con ?token en la URL; el caso PROD (false) está
+ * en RealtimeSinQueryTokenIT.
+ */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "tripbus.realtime.allow-query-token=true")
+@ActiveProfiles("it")
+@Testcontainers
 class RealtimeIT {
+
+    @Container
+    @ServiceConnection(name = "redis")
+    static GenericContainer<?> redis = new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
 
     @LocalServerPort
     private int port;
     @Autowired
-    private StringRedisTemplate redis;
+    private StringRedisTemplate redisTemplate;
     @Autowired
     private ObjectMapper mapper;
 
-    @MockBean
+    @MockitoBean
     private JwtDecoder jwtDecoder;
-    @MockBean
+    @MockitoBean
     private SnapshotService snapshotService;
 
     private final BlockingQueue<JsonNode> received = new LinkedBlockingQueue<>();
@@ -91,7 +104,7 @@ class RealtimeIT {
         next("subscribed");
         assertThat(next("snapshot").path("data").path("itineraryId").asText()).isEqualTo(itineraryId.toString());
 
-        redis.opsForStream().add(StreamRecords.newRecord().in("tripbus:events:realtime-test").ofMap(Map.of(
+        redisTemplate.opsForStream().add(StreamRecords.newRecord().in("tripbus:events:realtime-test").ofMap(Map.of(
                 "eventId", UUID.randomUUID().toString(), "type", "SeatHeld", "source", "test",
                 "occurredAt", Instant.now().toString(),
                 "payload", "{\"itineraryId\":\"" + itineraryId + "\",\"seatNumbers\":[\"7\"],\"userId\":\"secreto\"}")));

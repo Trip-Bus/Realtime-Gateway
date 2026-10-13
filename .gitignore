@@ -23,5 +23,7 @@ Thumbs.db
 
 ### Secretos locales ###
 .env
+.env.*
+!.env.example
 secrets/
 *.pem

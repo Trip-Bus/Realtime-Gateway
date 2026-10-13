@@ -13,10 +13,14 @@ public record RealtimeProperties(
         Duration heartbeatTimeout,
         Duration authTimeout,
         int maxSubscriptions,
+        // Suscripciones simultáneas de una sesión anónima (seguimiento público, US-039).
+        int maxAnonymousSubscriptions,
         String seatInventoryUrl,
         String flashOffersUrl,
         String fleetUrl,
-        String publicApiUrl) {
+        String publicApiUrl,
+        // Acepta ?token=JWT en el handshake de /ws (IDE y QA). En PROD false: solo el mensaje connect.
+        boolean allowQueryToken) {
 
     public RealtimeProperties {
         eventsStream = eventsStream != null ? eventsStream : "tripbus:events";
@@ -25,5 +29,6 @@ public record RealtimeProperties(
         heartbeatTimeout = heartbeatTimeout != null ? heartbeatTimeout : Duration.ofSeconds(45);
         authTimeout = authTimeout != null ? authTimeout : Duration.ofSeconds(10);
         maxSubscriptions = maxSubscriptions > 0 ? maxSubscriptions : 20;
+        maxAnonymousSubscriptions = maxAnonymousSubscriptions > 0 ? maxAnonymousSubscriptions : 5;
     }
 }

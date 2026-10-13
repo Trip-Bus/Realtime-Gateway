@@ -1,15 +1,28 @@
 spring:
   application:
     name: realtime-gateway
+
+  # "qa" y "prod" activan además el perfil "desplegado" (exige secretos, sin valores por defecto).
+  profiles:
+    group:
+      qa: desplegado
+      prod: desplegado
+
+  # Sin base de datos: el gateway solo usa Redis (Streams de eventos).
   data:
     redis:
       host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
+      port: ${REDIS_PORT:18100}
+      password: ${REDIS_PASSWORD:}
       timeout: 2s
 
 server:
-  port: 16007
+  port: ${SERVER_PORT:18007}
   shutdown: graceful
+  # Detrás del API Gateway NGINX: no se confía en X-Forwarded-* (ni para autenticar, que depende solo
+  # del JWT, ni para el chequeo de Origin, que usa WS_ALLOWED_ORIGINS). Explícito porque Spring Boot
+  # lo activa solo al detectar Kubernetes.
+  forward-headers-strategy: none
 
 management:
   endpoints:
@@ -23,20 +36,33 @@ management:
   metrics:
     tags:
       application: realtime-gateway
+  info:
+    env:
+      enabled: true
+
+# /actuator/info: commit con el que se construyó la imagen (build-arg GIT_COMMIT del Dockerfile).
+info:
+  app:
+    commit: ${APP_COMMIT:local}
 
 tripbus:
   realtime:
-    jwks-uri: ${IDENTITY_JWKS_URI:http://localhost:16001/.well-known/jwks.json}
+    jwks-uri: ${IDENTITY_JWKS_URI:http://localhost:18001/.well-known/jwks.json}
     events-stream: ${EVENTS_STREAM:tripbus:events}
     allowed-origins: ${WS_ALLOWED_ORIGINS:*}
+    # ?token=JWT en la URL de /ws (queda en logs, historial y proxies). true solo para IDE/QA; PROD lo
+    # pone en false y el cliente se autentica con {"type":"connect","token":...} (US-030).
+    allow-query-token: ${WS_ALLOW_QUERY_TOKEN:true}
     heartbeat-interval: 20s
     heartbeat-interval-ms: 20000
     heartbeat-timeout: 45s
     auth-timeout: 10s
     max-subscriptions: 20
+    # Seguimiento público (US-039): una conexión sin cuenta sigue solo temas públicos, hasta 5 a la vez.
+    max-anonymous-subscriptions: 5
     # Snapshots iniciales (lectura de los servicios dueños del dato).
-    seat-inventory-url: ${SEAT_INVENTORY_URL:http://localhost:16003}
-    flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:16006}
-    fleet-url: ${FLEET_URL:http://localhost:16005}
+    seat-inventory-url: ${SEAT_INVENTORY_URL:http://localhost:18003}
+    flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:18006}
+    fleet-url: ${FLEET_URL:http://localhost:18005}
     # URL pública del API Gateway que usa la página de demostración.
-    public-api-url: ${PUBLIC_API_URL:http://localhost:8080}
+    public-api-url: ${PUBLIC_API_URL:http://localhost:18000}

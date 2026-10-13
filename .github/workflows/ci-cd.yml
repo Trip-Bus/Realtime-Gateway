@@ -1,84 +1,262 @@
-# CI/CD (HT-02): compila, ejecuta TODAS las pruebas (incluidas las de integración con
-# PostgreSQL/Redis reales) y, en main/develop, publica la imagen Docker en GHCR.
+# CI/CD de realtime-gateway.
+#
+# Flujo de ramas y entornos:
+#   rama de trabajo --PR--> develop (QA) --PR de release--> main (PROD)
+#   - develop = QA:   cada push publica la imagen con los tags  qa, develop, sha-<corto>.
+#   - main    = PROD: cada push publica la imagen con los tags  prod, latest, sha-<corto>.
+#   - Los PR y workflow_dispatch compilan, prueban y escanean, pero no publican.
+#
+# SonarQube Cloud solo corre en develop (push a develop y PR con base develop):
+#   - el plan Free analiza una única rama, y la rama principal del proyecto en Sonar es "develop";
+#   - lo que llega a main es el mismo código que ya pasó el quality gate en develop.
+#   En main (push, PR hacia main, workflow_dispatch) se ejecuta mvn verify sin Sonar.
+#
+# Jobs:
+#   secretos   -> Gitleaks sobre todo el historial git.
+#   build-test -> compila, pruebas (unitarias e integración con Redis vía Testcontainers),
+#                 cobertura JaCoCo con control jacoco:check (en TODAS las ramas, también en main: el build
+#                 falla si la cobertura baja de los mínimos del pom), resumen de cobertura en la ejecución
+#                 y, en develop con SONAR_TOKEN, análisis + quality gate en SonarQube Cloud.
+#   docker     -> construye la imagen, la escanea con Trivy (siempre) y, solo en push, la publica en GHCR.
+#
+# Login a Docker Hub (secretos DOCKERHUB_USERNAME y DOCKERHUB_TOKEN, token de solo lectura):
+#   los runners de GitHub comparten IP y agotan el límite de descargas anónimas de Docker Hub
+#   ("toomanyrequests"), lo que rompía Testcontainers (redis) y el build (maven, eclipse-temurin).
+#   Por eso secretos, build-test y docker inician sesión en docker.io antes de todo; Testcontainers,
+#   docker run y buildx reutilizan esas credenciales. Si los secretos no existen se descarga sin
+#   autenticar (igual que antes) y se deja un aviso. Gitleaks se descarga desde GHCR (ghcr.io/gitleaks).
+# Las actions están fijadas por SHA de commit (inmutable); el comentario indica la versión (runtime Node 24).
 name: CI/CD
 
 on:
   push:
-    branches: [main, develop]
+    branches: [develop, main]
   pull_request:
-    branches: [main, develop]
+    branches: [develop, main]
   workflow_dispatch:
 
+# Mínimo privilegio: a nivel de workflow solo lectura; packages: write se concede únicamente al job
+# docker, el único que publica en GHCR.
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-test:
-    name: Compilar y probar
+  secretos:
+    name: Secretos (Gitleaks)
     runs-on: ubuntu-latest
-    services:
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-java@v4
+      - name: Login a Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Aviso sin login a Docker Hub
+        if: env.DOCKERHUB_TOKEN == ''
+        run: |
+          echo "::warning::Falta el secreto DOCKERHUB_TOKEN: las imágenes se descargan sin autenticar y pueden fallar por el límite de Docker Hub."
+
+      # Imagen oficial en vez de gitleaks-action (esa exige licencia en organizaciones).
+      # Un falso positivo revisado se acepta agregando su huella a .gitleaksignore.
+      - name: Gitleaks
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" -w /repo ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git /repo --redact --no-banner -v
+
+  build-test:
+    name: Compilar, probar y analizar
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      # 'true' solo en push a develop o en PR con base develop (la única rama que analiza Sonar).
+      SONAR_APLICA: ${{ github.ref == 'refs/heads/develop' || github.base_ref == 'develop' }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # Sonar necesita el historial para saber qué código es nuevo
+
+      # Testcontainers lee las credenciales de ~/.docker/config.json que deja este login.
+      - name: Login a Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Aviso sin login a Docker Hub
+        if: env.DOCKERHUB_TOKEN == ''
+        run: |
+          echo "::warning::Falta el secreto DOCKERHUB_TOKEN: las imágenes se descargan sin autenticar y pueden fallar por el límite de Docker Hub."
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
 
-      - name: Pruebas (unitarias + integración)
-        env:
-          TRIPBUS_IT: "true"
-        run: mvn -B verify
+      # Testcontainers usa el Docker del runner: no hacen falta services de redis.
+      - name: Pruebas + SonarQube Cloud (falla si no pasa el quality gate)
+        if: env.SONAR_TOKEN != '' && env.SONAR_APLICA == 'true'
+        run: mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar -Dsonar.qualitygate.wait=true
+
+      - name: Pruebas (sin Sonar)
+        if: env.SONAR_TOKEN == '' || env.SONAR_APLICA != 'true'
+        run: |
+          if [ "$SONAR_APLICA" != "true" ]; then
+            if [ "$GITHUB_REF" = "refs/heads/main" ] || [ "$GITHUB_BASE_REF" = "main" ]; then
+              echo "::notice::main/PROD: Sonar no aplica; el código ya pasó el quality gate en develop."
+            else
+              echo "::notice::Sonar solo se ejecuta en push a develop y en PR con base develop (plan Free: una sola rama)."
+            fi
+          else
+            echo "::warning::Falta configurar el secreto SONAR_TOKEN: se omite el análisis de SonarQube Cloud."
+          fi
+          mvn -B verify
+
+      # Tabla de cobertura en el resumen de la ejecución (sin descargar artefactos). Los mínimos se
+      # leen del pom (jacoco.minimo.*), los mismos que exige jacoco:check.
+      - name: Resumen de cobertura
+        if: always()
+        run: |
+          CSV=target/site/jacoco/jacoco.csv
+          if [ ! -f "$CSV" ]; then
+            echo "### Cobertura JaCoCo" >> "$GITHUB_STEP_SUMMARY"
+            echo "No se generó $CSV (las pruebas no llegaron a la fase verify)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          MIN_L=$(sed -n 's:.*<jacoco.minimo.lineas>\(.*\)</jacoco.minimo.lineas>.*:\1:p' pom.xml)
+          MIN_B=$(sed -n 's:.*<jacoco.minimo.ramas>\(.*\)</jacoco.minimo.ramas>.*:\1:p' pom.xml)
+          # Columnas de jacoco.csv: 6 BRANCH_MISSED, 7 BRANCH_COVERED, 8 LINE_MISSED, 9 LINE_COVERED.
+          awk -F, -v minL="$MIN_L" -v minB="$MIN_B" '
+            NR > 1 { lm += $8; lc += $9; bm += $6; bc += $7 }
+            END {
+              pl = (lm + lc) ? 100 * lc / (lm + lc) : 0
+              pb = (bm + bc) ? 100 * bc / (bm + bc) : 0
+              okL = (pl >= 100 * minL) ? "✅" : "❌"
+              okB = (pb >= 100 * minB) ? "✅" : "❌"
+              print "### Cobertura JaCoCo"
+              print ""
+              print "| Métrica | Cubierto | Cobertura | Mínimo (jacoco:check) | |"
+              print "|---|---|---|---|---|"
+              printf "| Líneas | %d / %d | %.1f %% | %.0f %% | %s |\n", lc, lm + lc, pl, 100 * minL, okL
+              printf "| Ramas | %d / %d | %.1f %% | %.0f %% | %s |\n", bc, bm + bc, pb, 100 * minB, okB
+            }' "$CSV" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Reportes de pruebas
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: surefire-reports
           path: target/surefire-reports/
           if-no-files-found: ignore
 
-  docker:
-    name: Imagen Docker
-    needs: build-test
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - name: Reporte de cobertura
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: jacoco
+          path: target/site/jacoco/
+          if-no-files-found: ignore
 
-      - uses: docker/login-action@v3
+  docker:
+    name: Imagen Docker (Trivy y publicación)
+    needs: [secretos, build-test]
+    runs-on: ubuntu-latest
+    # Los permisos del job reemplazan a los del workflow: se repite contents: read para el checkout.
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # buildx descarga las imágenes base (maven, eclipse-temurin) con este login.
+      - name: Login a Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Aviso sin login a Docker Hub
+        if: env.DOCKERHUB_TOKEN == ''
+        run: |
+          echo "::warning::Falta el secreto DOCKERHUB_TOKEN: las imágenes se descargan sin autenticar y pueden fallar por el límite de Docker Hub."
+
+      # Tags por entorno: develop -> qa, develop ; main -> prod, latest ; ambos -> sha-<corto>.
+      # Solo se publican en push (ver "Publicar imagen"); en PR/dispatch se calculan pero no se suben.
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/realtime-gateway
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=qa,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
+            type=raw,value=prod,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=short
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Primero se construye y se carga en el Docker local (sin publicar) para escanearla.
+      - name: Construir imagen
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          build-args: GIT_COMMIT=${{ github.sha }}
+          tags: realtime-gateway:ci
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Composite: internamente usa setup-trivy v0.2.6 y actions/cache v5 (ambas Node 24).
+      - name: Trivy (vulnerabilidades CRITICAL/HIGH con corrección disponible)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: realtime-gateway:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+          # Aceptadas sin arreglo en Spring Boot 3.x, con fecha de vencimiento.
+          trivyignores: .trivyignore.yaml
+
+      - name: Login a GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/realtime-gateway
-          tags: |
-            type=sha,format=short
-            type=ref,event=branch
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/build-push-action@v6
+      # Mismo build (sale de la caché) pero publicando con los tags definitivos.
+      - name: Publicar imagen
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: true
+          build-args: GIT_COMMIT=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max

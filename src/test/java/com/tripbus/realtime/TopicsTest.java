@@ -34,4 +34,50 @@ class TopicsTest {
         assertThat(Topics.forEvent("PositionUpdated", pos)).containsExactly("bus:" + id + ":posicion");
         assertThat(Topics.forEvent("BookingCreated", seat)).isEmpty();
     }
+
+    @Test
+    void losCuatroTiposDeTopicoSonPublicosYLosInvalidosNo() {
+        UUID id = UUID.randomUUID();
+        assertThat(Topics.isPublic("bus:" + id + ":posicion")).isTrue();
+        assertThat(Topics.isPublic("viaje:" + id + ":eventos")).isTrue();
+        assertThat(Topics.isPublic("oferta:" + id + ":cupo")).isTrue();
+        assertThat(Topics.isPublic("itinerario:" + id + ":asientos")).isTrue();
+        assertThat(Topics.isPublic("bus:" + id + ":asientos")).isFalse();
+        assertThat(Topics.isPublic(null)).isFalse();
+    }
+
+    @Test
+    void elTemaDeTiquetesDelUsuarioEsPrivadoYSinSnapshot() {
+        UUID id = UUID.randomUUID();
+        Topics.Parsed parsed = Topics.parse("usuario:" + id + ":tiquetes");
+        assertThat(parsed.kind()).isEqualTo(Topics.Kind.TIQUETES);
+        assertThat(parsed.id()).isEqualTo(id);
+        assertThat(parsed.kind().hasSnapshot()).isFalse();
+        assertThat(Topics.Kind.POSICION.hasSnapshot()).isTrue();
+        assertThat(Topics.isPublic("usuario:" + id + ":tiquetes")).isFalse();
+        assertThat(Topics.parse("usuario:" + id + ":posicion")).isNull();
+        assertThat(Topics.parse("bus:" + id + ":tiquetes")).isNull();
+        assertThat(Topics.parse("usuario:no-es-uuid:tiquetes")).isNull();
+    }
+
+    @Test
+    void soloElDuenoPuedeSeguirSuTemaDeTiquetes() {
+        UUID id = UUID.randomUUID();
+        Topics.Parsed parsed = Topics.parse("usuario:" + id + ":tiquetes");
+        assertThat(Topics.isOwnedBy(parsed, id.toString())).isTrue();
+        assertThat(Topics.isOwnedBy(parsed, id.toString().toUpperCase())).isTrue();
+        assertThat(Topics.isOwnedBy(parsed, UUID.randomUUID().toString())).isFalse();
+        assertThat(Topics.isOwnedBy(parsed, null)).isFalse();
+        assertThat(Topics.isOwnedBy(parsed, "no-es-uuid")).isFalse();
+        assertThat(Topics.isOwnedBy(null, id.toString())).isFalse();
+    }
+
+    @Test
+    void ticketIssuedVaAlTemaPrivadoDelComprador() throws Exception {
+        UUID userId = UUID.randomUUID();
+        var ticket = mapper.readTree("{\"userId\":\"" + userId.toString().toUpperCase() + "\",\"ticketId\":\""
+                + UUID.randomUUID() + "\",\"offerId\":\"" + UUID.randomUUID() + "\"}");
+        assertThat(Topics.forEvent("TicketIssued", ticket)).containsExactly("usuario:" + userId + ":tiquetes");
+        assertThat(Topics.forEvent("TicketIssued", mapper.readTree("{\"ticketId\":\"x\"}"))).isEmpty();
+    }
 }

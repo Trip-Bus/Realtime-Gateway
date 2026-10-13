@@ -1,0 +1,9 @@
+# Perfil "qa": Docker Compose en el computador del desarrollador (activa también "desplegado").
+logging:
+  level:
+    com.tripbus: DEBUG
+
+tripbus:
+  realtime:
+    # El frontend actual todavía abre /ws?token=...: se mantiene mientras migra al mensaje connect.
+    allow-query-token: ${WS_ALLOW_QUERY_TOKEN:true}

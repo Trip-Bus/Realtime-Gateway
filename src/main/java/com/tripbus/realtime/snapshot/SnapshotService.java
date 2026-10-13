@@ -2,6 +2,7 @@ package com.tripbus.realtime.snapshot;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.tripbus.realtime.config.RealtimeProperties;
+import com.tripbus.realtime.config.RequestIdPropagationInterceptor;
 import com.tripbus.realtime.ws.Topics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,7 +33,11 @@ public class SnapshotService {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(1000);
         factory.setReadTimeout(3000);
-        return RestClient.builder().baseUrl(baseUrl).requestFactory(factory).build();
+        return RestClient.builder()
+                .baseUrl(baseUrl)
+                .requestFactory(factory)
+                .requestInterceptor(new RequestIdPropagationInterceptor())
+                .build();
     }
 
     /** Optional.empty() = no se pudo obtener; Optional.of(NullNode) = no hay datos todavía. */
@@ -43,6 +48,8 @@ public class SnapshotService {
                 case CUPO -> flashOffers.get().uri("/offers/{id}/quota", topic.id()).retrieve().body(JsonNode.class);
                 case EVENTOS -> fleet.get().uri("/trips/{id}/timeline", topic.id()).retrieve().body(JsonNode.class);
                 case POSICION -> fleet.get().uri("/buses/{id}/position", topic.id()).retrieve().body(JsonNode.class);
+                // Sin snapshot (Kind.hasSnapshot): RealtimeHandler no lo pide.
+                case TIQUETES -> com.fasterxml.jackson.databind.node.NullNode.getInstance();
             };
             return Optional.ofNullable(data);
         } catch (HttpClientErrorException.NotFound e) {

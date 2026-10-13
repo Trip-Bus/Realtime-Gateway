@@ -2,6 +2,8 @@ package com.tripbus.realtime.events;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.tripbus.realtime.config.RealtimeProperties;
 import com.tripbus.realtime.ws.ClientSession;
@@ -19,22 +21,27 @@ import org.springframework.data.redis.connection.stream.StreamOffset;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.stream.StreamMessageListenerContainer;
 import org.springframework.stereotype.Component;
+import org.springframework.web.socket.CloseStatus;
 
 import java.time.Duration;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /**
  * Lee TODOS los eventos del bus (sin consumer group: cada réplica recibe todo, como un
  * Pub/Sub) y los difunde a las conexiones suscritas al tópico correspondiente (US-021,
- * US-047, US-056). Nunca reenvía el userId de otros pasajeros.
+ * US-047, US-056). Los tópicos públicos (US-039: los siguen también sesiones anónimas) nunca
+ * reciben datos de un pasajero: ni su userId ni los ids de su retención o reserva. El aviso privado
+ * de tiquete (US-033) lleva solo bookingId, ticketId, itineraryId y seatNumbers: nunca qrCode ni userId.
  */
 @Component
 public class EventFanout implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(EventFanout.class);
-    private static final Set<String> PRIVATE_FIELDS = Set.of("userId");
+    private static final Set<String> PRIVATE_FIELDS = Set.of("userId", "holdId", "bookingId");
+    private static final List<String> TICKET_NOTICE_FIELDS = List.of("bookingId", "ticketId", "itineraryId", "seatNumbers");
 
     private final RedisConnectionFactory connectionFactory;
     private final StringRedisTemplate redis;
@@ -109,11 +116,10 @@ public class EventFanout implements SmartLifecycle {
                 out.put("event", type);
                 out.put("eventId", fields.get("eventId"));
                 out.put("occurredAt", fields.get("occurredAt"));
-                out.set("data", sanitize(payload));
+                out.set("data", data(type, payload));
                 String json = out.toString();
                 for (ClientSession session : subscribers) {
-                    session.send(json);
-                    delivered.increment();
+                    deliver(session, json);
                 }
             }
         } catch (Exception e) {
@@ -121,18 +127,56 @@ public class EventFanout implements SmartLifecycle {
         }
     }
 
-    private static JsonNode sanitize(JsonNode payload) {
-        if (payload instanceof ObjectNode object) {
-            ObjectNode copy = object.deepCopy();
-            Iterator<String> names = copy.fieldNames();
-            while (names.hasNext()) {
-                if (PRIVATE_FIELDS.contains(names.next())) {
-                    names.remove();
+    /** Un fallo con un suscriptor nunca impide enviar al siguiente (US-031). */
+    private void deliver(ClientSession session, String json) {
+        try {
+            if (session.send(json)) {
+                delivered.increment();
+                return;
+            }
+        } catch (RuntimeException e) {
+            log.warn("Fallo inesperado enviando a la sesión {} ({})", session.id(), e.getClass().getSimpleName());
+            session.close(CloseStatus.SESSION_NOT_RELIABLE);
+        }
+        // La sesión fallida o ya cerrada deja de recibir eventos aunque el cierre tarde.
+        registry.remove(session.id());
+    }
+
+    /** Lo que ve el cliente: el aviso de tiquete se arma campo a campo; el resto, sin campos privados. */
+    static JsonNode data(String type, JsonNode payload) {
+        if (!"TicketIssued".equals(type)) {
+            return sanitize(payload);
+        }
+        ObjectNode notice = JsonNodeFactory.instance.objectNode();
+        for (String field : TICKET_NOTICE_FIELDS) {
+            if (payload.has(field)) {
+                notice.set(field, payload.get(field).deepCopy());
+            }
+        }
+        return notice;
+    }
+
+    /** Copia sin campos privados a cualquier profundidad (p. ej. el detalle libre de TripEventReported). */
+    static JsonNode sanitize(JsonNode payload) {
+        JsonNode copy = payload.deepCopy();
+        strip(copy);
+        return copy;
+    }
+
+    private static void strip(JsonNode node) {
+        if (node instanceof ObjectNode object) {
+            Iterator<Map.Entry<String, JsonNode>> fields = object.properties().iterator();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                if (PRIVATE_FIELDS.contains(field.getKey())) {
+                    fields.remove();
+                } else {
+                    strip(field.getValue());
                 }
             }
-            return copy;
+        } else if (node instanceof ArrayNode array) {
+            array.forEach(EventFanout::strip);
         }
-        return payload;
     }
 
     @Override
