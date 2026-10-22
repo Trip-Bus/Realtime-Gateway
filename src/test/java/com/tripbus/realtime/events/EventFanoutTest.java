@@ -147,6 +147,32 @@ class EventFanoutTest {
     }
 
     @Test
+    void laPosicionPorViajeLlegaAAmbosTopicosSinConductorId() throws IOException {
+        UUID busId = UUID.randomUUID();
+        WebSocketSession porBus = raw("bus");
+        WebSocketSession porViaje = raw("viaje");
+        ClientSession busSession = new ClientSession(porBus, Instant.now());
+        ClientSession viajeSession = new ClientSession(porViaje, Instant.now());
+        registry.add(busSession);
+        registry.add(viajeSession);
+        registry.subscribe(busSession, "bus:" + busId + ":posicion");
+        registry.subscribe(viajeSession, "viaje:" + itinerary + ":posicion");
+
+        fanout.onEvent(StreamRecords.newRecord().in("tripbus:events").ofMap(Map.of(
+                "type", "PositionUpdated", "eventId", UUID.randomUUID().toString(),
+                "occurredAt", Instant.now().toString(),
+                "payload", "{\"busId\":\"" + busId + "\",\"itineraryId\":\"" + itinerary
+                        + "\",\"lat\":4.6,\"conductorId\":\"secreto\"}")));
+
+        var captor = ArgumentCaptor.forClass(TextMessage.class);
+        verify(porViaje).sendMessage(captor.capture());
+        assertThat(captor.getValue().getPayload()).contains("\"lat\":4.6", "viaje:" + itinerary + ":posicion")
+                .doesNotContain("conductorId", "secreto");
+        verify(porBus).sendMessage(any(TextMessage.class));
+        assertThat(delivered()).isEqualTo(2.0);
+    }
+
+    @Test
     void elAvisoDeTiqueteLlevaSoloLosIdsSinQrNiUserId() throws IOException {
         UUID userId = UUID.randomUUID();
         String privado = "usuario:" + userId + ":tiquetes";

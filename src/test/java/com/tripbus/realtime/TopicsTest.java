@@ -47,6 +47,32 @@ class TopicsTest {
     }
 
     @Test
+    void laPosicionPorViajeEsPublicaConSnapshot() {
+        UUID id = UUID.randomUUID();
+        Topics.Parsed parsed = Topics.parse("viaje:" + id + ":posicion");
+        assertThat(parsed.kind()).isEqualTo(Topics.Kind.POSICION_VIAJE);
+        assertThat(parsed.id()).isEqualTo(id);
+        assertThat(parsed.kind().hasSnapshot()).isTrue();
+        assertThat(Topics.isPublic("viaje:" + id + ":posicion")).isTrue();
+        assertThat(Topics.parse("oferta:" + id + ":posicion")).isNull();
+    }
+
+    @Test
+    void positionUpdatedVaAlBusDeprecadoYAlViajeYTrackingStatusSoloAlViaje() throws Exception {
+        UUID busId = UUID.randomUUID();
+        UUID itineraryId = UUID.randomUUID();
+        var pos = mapper.readTree("{\"busId\":\"" + busId + "\",\"itineraryId\":\""
+                + itineraryId.toString().toUpperCase() + "\"}");
+        assertThat(Topics.forEvent("PositionUpdated", pos))
+                .containsExactly("bus:" + busId + ":posicion", "viaje:" + itineraryId + ":posicion");
+        var soloBus = mapper.readTree("{\"busId\":\"" + busId + "\"}");
+        assertThat(Topics.forEvent("PositionUpdated", soloBus)).containsExactly("bus:" + busId + ":posicion");
+        var estado = mapper.readTree("{\"itineraryId\":\"" + itineraryId + "\",\"estadoRastreo\":\"SIN_SENAL\"}");
+        assertThat(Topics.forEvent("TrackingStatusChanged", estado)).containsExactly("viaje:" + itineraryId + ":posicion");
+        assertThat(Topics.forEvent("TrackingStatusChanged", soloBus)).isEmpty();
+    }
+
+    @Test
     void elTemaDeTiquetesDelUsuarioEsPrivadoYSinSnapshot() {
         UUID id = UUID.randomUUID();
         Topics.Parsed parsed = Topics.parse("usuario:" + id + ":tiquetes");

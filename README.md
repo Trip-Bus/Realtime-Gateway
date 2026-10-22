@@ -58,11 +58,17 @@ ruta). Detrás del gateway, la autenticación depende solo del JWT y el `Origin`
 | `itinerario:{id}:asientos` | Público | `SeatHeld`, `SeatReleased`, `SeatSold`, `HoldExpired`, `SeatStateChanged` | Mapa de asientos (seat-inventory) |
 | `oferta:{id}:cupo` | Público | `OfferQuotaUpdated`, `OfferClosed`, `OfferSoldOut`, `OfferActivated` | Cupo (flash-offers) |
 | `viaje:{id}:eventos` | Público | `TripEventReported` | Línea de tiempo (fleet) |
-| `bus:{id}:posicion` | Público | `PositionUpdated` | Última posición (fleet) |
+| `viaje:{id}:posicion` | Público | `PositionUpdated` (con `itineraryId`), `TrackingStatusChanged` (`ACTIVO`, `EN_PAUSA`, `SIN_SENAL`, `FINALIZADO`) | `GET {fleet}/itineraries/{id}/bus-position`: posición, estado, paradas, `estadoRastreo` y `ultimaPosicionEn` (US-173/US-174) |
+| `bus:{id}:posicion` | Público — **deprecado** | `PositionUpdated` | Última posición (fleet) |
 | `usuario:{uuid}:tiquetes` | **Privado**: solo la sesión autenticada cuyo `userId` es `{uuid}` | `TicketIssued` (US-033) | Ninguno: solo `subscribed` |
 
+- **`viaje:{id}:posicion`** (`{id}` = itinerario) es el tópico para seguir el bus de un viaje: trae la
+  posición y el estado del rastreo. **`bus:{id}:posicion` está deprecado:** `PositionUpdated` se sigue
+  difundiendo ahí para no romper al frontend actual, pero los clientes nuevos deben usar
+  `viaje:{id}:posicion`; se quitará cuando el frontend haya migrado.
 - **Públicos:** los sigue cualquier sesión, también la anónima. Nunca llevan datos de pasajeros:
-  `userId`, `holdId` y `bookingId` se quitan de los eventos a cualquier profundidad (`EventFanout`).
+  `userId`, `holdId`, `bookingId` y `conductorId` se quitan de los eventos a cualquier profundidad
+  (`EventFanout`).
 - **Privado `usuario:{uuid}:tiquetes`:** aviso en vivo al comprador cuando booking emite su tiquete.
   Un anónimo u otro usuario (ADMIN incluido) ⇒ `FORBIDDEN_TOPIC` sin cerrar la conexión. El `data`
   lleva **solo** `bookingId`, `ticketId`, `itineraryId` y `seatNumbers` (nunca `qrCode` ni `userId`);
@@ -85,6 +91,12 @@ se permite la conexión con un WARN en el log (la expiración del token sigue pr
 sesión abierta, el evento `SessionRevoked {jti, userId}` cierra con 4401 las conexiones de ese `jti`
 (las de otros tokens del mismo usuario siguen abiertas) y `UserSuspended {userId}` todas las de ese
 usuario. Estos eventos no se reenvían a ningún tema y no afectan a las sesiones anónimas.
+
+**Cuentas suspendidas (US-104):** en la misma autenticación (`connect` o `?token=`), después del
+`jti`, el gateway consulta `tripbus:suspended:{sub}` en Redis (la escribe identity al suspender la
+cuenta). Si existe ⇒ `{"type":"error","code":"ACCOUNT_SUSPENDED"}` y cierre 4401, igual que un token
+revocado. Si Redis no responde se aplica el mismo criterio: se permite la conexión con un WARN. Las
+conexiones ya abiertas las cierra el evento `UserSuspended` (arriba).
 
 ### Orden de los eventos (`seq` y `asOfSeq`)
 
@@ -117,13 +129,13 @@ espera en la vía. Se abre `/ws` y se manda `connect` **sin token** (o con `"tok
 ```js
 ws.onopen = () => ws.send(JSON.stringify({ type: "connect" }));
 // servidor → {"type":"connected","anonymous":true,"heartbeatSeconds":20,"maxSubscriptions":5}
-ws.send(JSON.stringify({ type: "subscribe", topic: `bus:${busId}:posicion` }));
+ws.send(JSON.stringify({ type: "subscribe", topic: `viaje:${itineraryId}:posicion` }));
 ```
 
 - La sesión anónima no se cierra por `AUTH_TIMEOUT` ni por vencimiento de token (no tiene); sí por
   falta de heartbeat (4408), como cualquier otra.
-- Solo puede suscribirse a **temas públicos** (`Topics.isPublic`): `bus:{id}:posicion`,
-  `viaje:{id}:eventos`, `oferta:{id}:cupo`, `itinerario:{id}:asientos`. Otro tema ⇒ error
+- Solo puede suscribirse a **temas públicos** (`Topics.isPublic`): `viaje:{id}:posicion`,
+  `bus:{id}:posicion` (deprecado), `viaje:{id}:eventos`, `oferta:{id}:cupo`, `itinerario:{id}:asientos`. Otro tema ⇒ error
   `FORBIDDEN_TOPIC` sin cerrar la conexión.
 - Máximo **5 suscripciones** a la vez (`tripbus.realtime.max-anonymous-subscriptions`); la sexta ⇒
   `TOO_MANY_SUBSCRIPTIONS`. Las sesiones autenticadas siguen con `max-subscriptions` (20), los temas
@@ -281,7 +293,7 @@ mvn -B verify      # unitarias + integración con Redis real (Testcontainers: Do
 
 - `*Test` / `*Tests`: unitarias (`TopicsTest`, `RequiredSecretsCheckTest`, `RequestIdFilterTest`,
   `RequestIdPropagationInterceptorTest`, `ClientSessionTest`, `EventFanoutTest`,
-  `HandshakeAuthInterceptorTest`, `TokenRevocationsTest`, `PerfilesConfigTest`).
+  `HandshakeAuthInterceptorTest`, `TokenRevocationsTest`, `PerfilesConfigTest`, `SnapshotServiceTest`).
 - `RealtimeIT`: levanta Redis 7 con Testcontainers y prueba de extremo a extremo la conexión
   autenticada con `?token=` (`allow-query-token=true`), el snapshot inicial, la difusión desde Redis
   Streams (sin exponer `userId`), el ping y el rechazo de tokens y tópicos inválidos.
@@ -298,6 +310,11 @@ mvn -B verify      # unitarias + integración con Redis real (Testcontainers: Do
   mismo usuario y los anónimos siguen abiertos) y `UserSuspended` todas las del usuario; los eventos
   llevan `seq` creciente y el snapshot `asOfSeq`. Redis caído al consultar la revocación (permite la
   conexión con WARN) está en `TokenRevocationsTest`.
+- `RealtimePosicionViajeIT`: posición por viaje (US-173/US-174) y cuentas suspendidas (US-104). Un
+  anónimo sigue `viaje:{id}:posicion` con el snapshot de un fleet simulado (servidor HTTP local) y recibe
+  `PositionUpdated` (sin `conductorId`) y `TrackingStatusChanged`; `PositionUpdated` sigue llegando a
+  `bus:{id}:posicion`; con `tripbus:suspended:{sub}` la conexión se rechaza con `ACCOUNT_SUSPENDED` y
+  4401 tanto por `connect` como por `?token=`.
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -315,15 +332,15 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-10-12) | Mínimo |
+| Métrica | Medido (2026-10-22) | Mínimo |
 |---|---|---|
-| Líneas | 88,3 % | `jacoco.minimo.lineas` = 0.85 |
-| Ramas | 88,7 % | `jacoco.minimo.ramas` = 0.85 |
+| Líneas | 93,6 % | `jacoco.minimo.lineas` = 0.90 |
+| Ramas | 91,3 % | `jacoco.minimo.ramas` = 0.90 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y
 actualiza la propiedad en el pom en el mismo PR. Las mejores candidatas para subirla son
-`SnapshotService`, `RealtimeHandler` (heartbeat, `connect` y límites de suscripción) y `ClientSession`.
+`RealtimeHandler` (heartbeat, `connect` y límites de suscripción) y `ClientSession`.
 
 Fuera de la cobertura (misma en `sonar.coverage.exclusions` y en los `<excludes>` de JaCoCo) solo
 está `RealtimeGatewayApplication` (el arranque de Spring). `RealtimeProperties` es un record de
