@@ -57,6 +57,34 @@ class TokenRevocationsTest {
     }
 
     @Test
+    void cuentaConClaveDeSuspensionEstaSuspendida() {
+        when(redis.hasKey("tripbus:suspended:u1")).thenReturn(true);
+        assertThat(revocations.isSuspended("u1")).isTrue();
+    }
+
+    @Test
+    void cuentaSinClaveOSinSubNoEstaSuspendida() {
+        when(redis.hasKey(anyString())).thenReturn(false);
+        assertThat(revocations.isSuspended("u2")).isFalse();
+        verify(redis).hasKey("tripbus:suspended:u2");
+        assertThat(revocations.isSuspended(null)).isFalse();
+        assertThat(revocations.isSuspended(" ")).isFalse();
+    }
+
+    @Test
+    void redisCaidoAlConsultarLaSuspensionPermiteLaConexionYRegistraWarn() {
+        when(redis.hasKey(anyString())).thenThrow(new RedisConnectionFailureException("sin conexión"));
+
+        assertThat(revocations.isSuspended("u3")).isFalse();
+
+        assertThat(logs.list).singleElement().satisfies(event -> {
+            assertThat(event.getLevel()).isEqualTo(Level.WARN);
+            assertThat(event.getFormattedMessage()).contains("suspensión", "se permite la conexión")
+                    .doesNotContain("u3");
+        });
+    }
+
+    @Test
     void redisCaidoPermiteLaConexionYRegistraWarn() {
         when(redis.hasKey(anyString())).thenThrow(new RedisConnectionFailureException("sin conexión"));
 

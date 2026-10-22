@@ -119,14 +119,17 @@ public class RealtimeHandler extends TextWebSocketHandler {
     /**
      * Token revocado por logout (US-006) ⇒ UNAUTHENTICATED y cierre 4401. La sesión guarda el jti
      * ANTES de consultar la revocación: un SessionRevoked que llegue entre la consulta y el registro
-     * igual la encuentra (identity guarda la clave antes de publicar el evento).
+     * igual la encuentra (identity guarda la clave antes de publicar el evento). Cuenta suspendida
+     * (US-104, {@code tripbus:suspended:{sub}}) ⇒ ACCOUNT_SUSPENDED y el mismo cierre 4401.
      */
     private void authenticate(ClientSession session, Jwt jwt) {
         session.authenticate(jwt.getSubject(), jwt.getId(), jwt.getClaimAsString("role"), jwt.getExpiresAt());
         if (revocations.isRevoked(jwt.getId())) {
-            sendError(session, "UNAUTHENTICATED", "La sesión fue cerrada; inicie sesión de nuevo");
-            session.close(UNAUTHORIZED);
-            registry.remove(session.id());
+            reject(session, "UNAUTHENTICATED", "La sesión fue cerrada; inicie sesión de nuevo");
+            return;
+        }
+        if (revocations.isSuspended(jwt.getSubject())) {
+            reject(session, "ACCOUNT_SUSPENDED", "La cuenta está suspendida");
             return;
         }
         ObjectNode out = objectMapper.createObjectNode();
@@ -138,6 +141,12 @@ public class RealtimeHandler extends TextWebSocketHandler {
             out.put("tokenExpiresAt", jwt.getExpiresAt().toString());
         }
         session.send(out.toString());
+    }
+
+    private void reject(ClientSession session, String code, String message) {
+        sendError(session, code, message);
+        session.close(UNAUTHORIZED);
+        registry.remove(session.id());
     }
 
     /**

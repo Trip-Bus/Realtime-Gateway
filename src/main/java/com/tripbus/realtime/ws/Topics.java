@@ -8,6 +8,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Tópicos del doc:
@@ -15,7 +16,10 @@ import java.util.regex.Pattern;
  *   <li>{@code itinerario:{id}:asientos} — cambios de estado de asientos</li>
  *   <li>{@code oferta:{id}:cupo} — cupo restante de una oferta</li>
  *   <li>{@code viaje:{id}:eventos} — novedades del viaje</li>
- *   <li>{@code bus:{id}:posicion} — posición GPS del bus</li>
+ *   <li>{@code viaje:{id}:posicion} — posición GPS y estado de rastreo del bus que cubre el viaje
+ *       (US-173/US-174); {@code id} es el itinerario</li>
+ *   <li>{@code bus:{id}:posicion} — DEPRECADO: posición GPS del bus; se mantiene para el frontend
+ *       que aún lo sigue. Usar {@code viaje:{id}:posicion}</li>
  *   <li>{@code usuario:{id}:tiquetes} — PRIVADO: aviso de tiquete emitido (US-033); solo lo sigue la
  *       sesión autenticada de ese usuario</li>
  * </ul>
@@ -26,7 +30,11 @@ public final class Topics {
     private static final Pattern TOPIC = Pattern.compile("^(itinerario|oferta|viaje|bus|usuario):(" + UUID_RE + "):(asientos|cupo|eventos|posicion|tiquetes)$");
 
     public enum Kind {
-        ASIENTOS, CUPO, EVENTOS, POSICION,
+        ASIENTOS, CUPO, EVENTOS,
+        /** bus:{id}:posicion (deprecado). */
+        POSICION,
+        /** viaje:{id}:posicion: posición y estado de rastreo por itinerario. */
+        POSICION_VIAJE,
         /** Sin snapshot: el aviso solo trae ids y la app pide el tiquete por GET /tickets/{id}. */
         TIQUETES(false);
 
@@ -53,7 +61,7 @@ public final class Topics {
      * el bus en la vía no tiene cuenta. Sus payloads no llevan datos personales (EventFanout
      * quita los identificadores de pasajeros y de reservas).
      */
-    private static final Set<Kind> PUBLIC_KINDS = EnumSet.of(Kind.POSICION, Kind.EVENTOS, Kind.CUPO, Kind.ASIENTOS);
+    private static final Set<Kind> PUBLIC_KINDS = EnumSet.of(Kind.POSICION, Kind.POSICION_VIAJE, Kind.EVENTOS, Kind.CUPO, Kind.ASIENTOS);
 
     private Topics() {
     }
@@ -74,6 +82,7 @@ public final class Topics {
             case "oferta:cupo" -> Kind.CUPO;
             case "viaje:eventos" -> Kind.EVENTOS;
             case "bus:posicion" -> Kind.POSICION;
+            case "viaje:posicion" -> Kind.POSICION_VIAJE;
             case "usuario:tiquetes" -> Kind.TIQUETES;
             default -> null;
         };
@@ -109,7 +118,12 @@ public final class Topics {
             case "OfferQuotaUpdated", "OfferClosed", "OfferSoldOut", "OfferActivated" ->
                     single("oferta:", payload, "offerId", ":cupo");
             case "TripEventReported" -> single("viaje:", payload, "itineraryId", ":eventos");
-            case "PositionUpdated" -> single("bus:", payload, "busId", ":posicion");
+            // bus:{id}:posicion queda deprecado, pero se sigue difundiendo para no romper al frontend actual.
+            case "PositionUpdated" -> Stream.concat(
+                    single("bus:", payload, "busId", ":posicion").stream(),
+                    single("viaje:", payload, "itineraryId", ":posicion").stream()).toList();
+            // estadoRastreo: ACTIVO, EN_PAUSA, SIN_SENAL o FINALIZADO.
+            case "TrackingStatusChanged" -> single("viaje:", payload, "itineraryId", ":posicion");
             case "TicketIssued" -> single("usuario:", payload, "userId", ":tiquetes");
             default -> List.of();
         };

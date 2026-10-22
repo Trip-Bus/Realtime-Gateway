@@ -34,14 +34,15 @@ import java.util.Set;
  * Lee TODOS los eventos del bus (sin consumer group: cada réplica recibe todo, como un
  * Pub/Sub) y los difunde a las conexiones suscritas al tópico correspondiente (US-021,
  * US-047, US-056). Los tópicos públicos (US-039: los siguen también sesiones anónimas) nunca
- * reciben datos de un pasajero: ni su userId ni los ids de su retención o reserva. El aviso privado
+ * reciben datos de un pasajero: ni su userId ni los ids de su retención o reserva; tampoco el conductorId
+ * (fleet no lo manda, pero se quita por defensa). El aviso privado
  * de tiquete (US-033) lleva solo bookingId, ticketId, itineraryId y seatNumbers: nunca qrCode ni userId.
  */
 @Component
 public class EventFanout implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(EventFanout.class);
-    private static final Set<String> PRIVATE_FIELDS = Set.of("userId", "holdId", "bookingId");
+    private static final Set<String> PRIVATE_FIELDS = Set.of("userId", "holdId", "bookingId", "conductorId");
     private static final List<String> TICKET_NOTICE_FIELDS = List.of("bookingId", "ticketId", "itineraryId", "seatNumbers");
     private static final Set<String> REVOCATIONS = Set.of("SessionRevoked", "UserSuspended");
 
