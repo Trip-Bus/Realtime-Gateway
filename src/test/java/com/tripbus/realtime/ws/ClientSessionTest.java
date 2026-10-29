@@ -89,5 +89,10 @@ class ClientSessionTest {
         assertThat(session.anonymous()).isFalse();
         assertThat(session.authenticated()).isTrue();
         assertThat(session.identified()).isTrue();
+        assertThat(session.companyId()).isNull();
+
+        session.authenticate("op", "jti-2", "OPERADOR", "empresa-1", Instant.now().plusSeconds(60));
+        assertThat(session.role()).isEqualTo("OPERADOR");
+        assertThat(session.companyId()).isEqualTo("empresa-1");
     }
 }

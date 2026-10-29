@@ -51,7 +51,7 @@ public class SnapshotService {
                 // Posición, estado, paradas, estadoRastreo y ultimaPosicionEn del bus del itinerario.
                 case POSICION_VIAJE -> fleet.get().uri("/itineraries/{id}/bus-position", topic.id()).retrieve().body(JsonNode.class);
                 // Sin snapshot (Kind.hasSnapshot): RealtimeHandler no lo pide.
-                case TIQUETES -> com.fasterxml.jackson.databind.node.NullNode.getInstance();
+                case TIQUETES, AVISOS, VIAJE_CONDUCTOR, ALERTAS -> com.fasterxml.jackson.databind.node.NullNode.getInstance();
             };
             return Optional.ofNullable(data);
         } catch (HttpClientErrorException.NotFound e) {

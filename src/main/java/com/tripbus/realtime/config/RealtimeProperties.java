@@ -15,6 +15,8 @@ public record RealtimeProperties(
         int maxSubscriptions,
         // Suscripciones simultáneas de una sesión anónima (seguimiento público, US-039).
         int maxAnonymousSubscriptions,
+        // Suscripciones de OPERADOR y ADMIN, que siguen varios viajes y su canal de alertas. Sin valor: max-subscriptions.
+        int maxStaffSubscriptions,
         String seatInventoryUrl,
         String flashOffersUrl,
         String fleetUrl,
@@ -30,5 +32,11 @@ public record RealtimeProperties(
         authTimeout = authTimeout != null ? authTimeout : Duration.ofSeconds(10);
         maxSubscriptions = maxSubscriptions > 0 ? maxSubscriptions : 20;
         maxAnonymousSubscriptions = maxAnonymousSubscriptions > 0 ? maxAnonymousSubscriptions : 5;
+        maxStaffSubscriptions = maxStaffSubscriptions > 0 ? maxStaffSubscriptions : maxSubscriptions;
+    }
+
+    /** Límite de suscripciones de una sesión autenticada con este rol. */
+    public int maxSubscriptionsFor(String role) {
+        return "OPERADOR".equals(role) || "ADMIN".equals(role) ? maxStaffSubscriptions : maxSubscriptions;
     }
 }

@@ -99,11 +99,120 @@ class TopicsTest {
     }
 
     @Test
-    void ticketIssuedVaAlTemaPrivadoDelComprador() throws Exception {
+    void ticketIssuedVaAlTemaPrivadoDelCompradorYASusAvisos() throws Exception {
         UUID userId = UUID.randomUUID();
         var ticket = mapper.readTree("{\"userId\":\"" + userId.toString().toUpperCase() + "\",\"ticketId\":\""
                 + UUID.randomUUID() + "\",\"offerId\":\"" + UUID.randomUUID() + "\"}");
-        assertThat(Topics.forEvent("TicketIssued", ticket)).containsExactly("usuario:" + userId + ":tiquetes");
+        assertThat(Topics.forEvent("TicketIssued", ticket))
+                .containsExactly("usuario:" + userId + ":tiquetes", "usuario:" + userId + ":avisos");
         assertThat(Topics.forEvent("TicketIssued", mapper.readTree("{\"ticketId\":\"x\"}"))).isEmpty();
+    }
+
+    @Test
+    void losTemasPrivadosNuevosSonValidosPrivadosYSinSnapshot() {
+        UUID id = UUID.randomUUID();
+        assertThat(Topics.parse("usuario:" + id + ":avisos").kind()).isEqualTo(Topics.Kind.AVISOS);
+        assertThat(Topics.parse("conductor:" + id + ":viaje").kind()).isEqualTo(Topics.Kind.VIAJE_CONDUCTOR);
+        assertThat(Topics.parse("empresa:" + id + ":alertas").kind()).isEqualTo(Topics.Kind.ALERTAS);
+        for (String topic : new String[] {"usuario:" + id + ":avisos", "conductor:" + id + ":viaje",
+                "empresa:" + id + ":alertas"}) {
+            assertThat(Topics.isPublic(topic)).as(topic).isFalse();
+            assertThat(Topics.parse(topic).kind().hasSnapshot()).as(topic).isFalse();
+        }
+        assertThat(Topics.parse("empresa:" + id + ":avisos")).isNull();
+        assertThat(Topics.parse("conductor:" + id + ":alertas")).isNull();
+        assertThat(Topics.parse("usuario:" + id + ":viaje")).isNull();
+    }
+
+    @Test
+    void autorizaCadaTemaPrivadoSegunDuenoRolYEmpresa() {
+        String user = UUID.randomUUID().toString();
+        String company = UUID.randomUUID().toString();
+        String other = UUID.randomUUID().toString();
+        Topics.Parsed avisos = Topics.parse("usuario:" + user + ":avisos");
+        Topics.Parsed tiquetes = Topics.parse("usuario:" + user + ":tiquetes");
+        Topics.Parsed conductor = Topics.parse("conductor:" + user + ":viaje");
+        Topics.Parsed alertas = Topics.parse("empresa:" + company + ":alertas");
+
+        assertThat(Topics.canSubscribe(avisos, user, "PASAJERO", null)).isTrue();
+        assertThat(Topics.canSubscribe(tiquetes, user, "PASAJERO", null)).isTrue();
+        assertThat(Topics.canSubscribe(avisos, other, "ADMIN", null)).isFalse();
+        assertThat(Topics.canSubscribe(avisos, null, null, null)).isFalse();
+
+        assertThat(Topics.canSubscribe(conductor, user, "CONDUCTOR", null)).isTrue();
+        assertThat(Topics.canSubscribe(conductor, user, "PASAJERO", null)).isFalse();
+        assertThat(Topics.canSubscribe(conductor, other, "CONDUCTOR", null)).isFalse();
+        assertThat(Topics.canSubscribe(conductor, other, "ADMIN", null)).isFalse();
+
+        assertThat(Topics.canSubscribe(alertas, other, "OPERADOR", company.toUpperCase())).isTrue();
+        assertThat(Topics.canSubscribe(alertas, other, "OPERADOR", other)).isFalse();
+        assertThat(Topics.canSubscribe(alertas, other, "OPERADOR", null)).isFalse();
+        assertThat(Topics.canSubscribe(alertas, other, "OPERADOR", "no-es-uuid")).isFalse();
+        assertThat(Topics.canSubscribe(alertas, other, "ADMIN", null)).isTrue();
+        assertThat(Topics.canSubscribe(alertas, other, "PASAJERO", company)).isFalse();
+        assertThat(Topics.canSubscribe(alertas, null, "ADMIN", null)).isFalse();
+
+        assertThat(Topics.canSubscribe(Topics.parse("viaje:" + other + ":posicion"), null, null, null)).isTrue();
+        assertThat(Topics.canSubscribe(null, user, "ADMIN", null)).isFalse();
+    }
+
+    @Test
+    void enrutaLosAvisosDelPasajeroPorUserId() throws Exception {
+        UUID userId = UUID.randomUUID();
+        var conUsuario = mapper.readTree("{\"userId\":\"" + userId + "\",\"bookingId\":\"b\"}");
+        var sinUsuario = mapper.readTree("{\"bookingId\":\"b\"}");
+        for (String type : new String[] {"BookingAffected", "BookingRelocated", "RefundProcessed",
+                "TicketRescheduled", "TicketUpdated"}) {
+            assertThat(Topics.forEvent(type, conUsuario)).as(type).containsExactly("usuario:" + userId + ":avisos");
+            assertThat(Topics.forEvent(type, sinUsuario)).as(type).isEmpty();
+            assertThat(Topics.isUserNotice(type)).as(type).isTrue();
+        }
+        assertThat(Topics.isUserNotice("TicketIssued")).isTrue();
+        assertThat(Topics.isUserNotice("SeatHeld")).isFalse();
+    }
+
+    @Test
+    void enrutaLosEventosDelConductorYDeLaEmpresa() throws Exception {
+        UUID conductor = UUID.randomUUID();
+        UUID company = UUID.randomUUID();
+        UUID itinerary = UUID.randomUUID();
+        var asignacion = mapper.readTree("{\"conductorId\":\"" + conductor + "\",\"companyId\":\"" + company
+                + "\",\"itineraryId\":\"" + itinerary + "\"}");
+        String canal = "conductor:" + conductor + ":viaje";
+        String alertas = "empresa:" + company + ":alertas";
+        assertThat(Topics.forEvent("DriverAssigned", asignacion)).containsExactly(canal);
+        assertThat(Topics.forEvent("DriverUnassigned", asignacion)).containsExactly(canal);
+        assertThat(Topics.forEvent("DriverAssignmentConflict", asignacion)).containsExactly(canal, alertas);
+        for (String type : new String[] {"TripAlertRaised", "TripAlertResolved", "TripInterrupted"}) {
+            assertThat(Topics.forEvent(type, asignacion)).as(type).containsExactly(alertas);
+        }
+        assertThat(Topics.forEvent("TripAlertRaised", mapper.readTree("{\"itineraryId\":\"" + itinerary + "\"}")))
+                .isEmpty();
+    }
+
+    @Test
+    void trackingStatusSinSenalAvisaALaEmpresa() throws Exception {
+        UUID company = UUID.randomUUID();
+        UUID itinerary = UUID.randomUUID();
+        String base = "{\"itineraryId\":\"" + itinerary + "\",\"companyId\":\"" + company + "\",";
+        String posicion = "viaje:" + itinerary + ":posicion";
+        String alertas = "empresa:" + company + ":alertas";
+        assertThat(Topics.forEvent("TrackingStatusChanged", mapper.readTree(base + "\"estado\":\"SIN_SENAL\"}")))
+                .containsExactly(posicion, alertas);
+        assertThat(Topics.forEvent("TrackingStatusChanged", mapper.readTree(base + "\"estadoRastreo\":\"SIN_SENAL\"}")))
+                .containsExactly(posicion, alertas);
+        assertThat(Topics.forEvent("TrackingStatusChanged", mapper.readTree(base + "\"estado\":\"ACTIVO\"}")))
+                .containsExactly(posicion);
+    }
+
+    @Test
+    void etaYReprogramacionVanALosTemasPublicosDelViajeYElSosNunca() throws Exception {
+        UUID itinerary = UUID.randomUUID();
+        var payload = mapper.readTree("{\"itineraryId\":\"" + itinerary + "\",\"tipo\":\"AVERIA\"}");
+        assertThat(Topics.forEvent("EtaUpdated", payload)).containsExactly("viaje:" + itinerary + ":posicion");
+        assertThat(Topics.forEvent("ItineraryRescheduled", payload)).containsExactly("viaje:" + itinerary + ":eventos");
+        assertThat(Topics.forEvent("TripEventReported", payload)).containsExactly("viaje:" + itinerary + ":eventos");
+        var sos = mapper.readTree("{\"itineraryId\":\"" + itinerary + "\",\"tipo\":\"SOS\"}");
+        assertThat(Topics.forEvent("TripEventReported", sos)).isEmpty();
     }
 }

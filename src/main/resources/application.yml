@@ -60,6 +60,8 @@ tripbus:
     max-subscriptions: 20
     # Seguimiento público (US-039): una conexión sin cuenta sigue solo temas públicos, hasta 5 a la vez.
     max-anonymous-subscriptions: 5
+    # OPERADOR y ADMIN siguen varios viajes y su canal empresa:{id}:alertas. Sin valor, igual a max-subscriptions.
+    max-staff-subscriptions: 20
     # Snapshots iniciales (lectura de los servicios dueños del dato).
     seat-inventory-url: ${SEAT_INVENTORY_URL:http://localhost:18003}
     flash-offers-url: ${FLASH_OFFERS_URL:http://localhost:18006}

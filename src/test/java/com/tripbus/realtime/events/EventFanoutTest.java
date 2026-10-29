@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tripbus.realtime.config.RealtimeProperties;
 import com.tripbus.realtime.ws.ClientSession;
 import com.tripbus.realtime.ws.SessionRegistry;
+import com.tripbus.realtime.ws.Topics;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -48,7 +49,7 @@ class EventFanoutTest {
     void setUp() {
         meters = new SimpleMeterRegistry();
         registry = new SessionRegistry(meters);
-        RealtimeProperties properties = new RealtimeProperties(null, null, null, null, null, null, 0, 0,
+        RealtimeProperties properties = new RealtimeProperties(null, null, null, null, null, null, 0, 0, 0,
                 null, null, null, null, false);
         fanout = new EventFanout(mock(RedisConnectionFactory.class), mock(StringRedisTemplate.class), registry,
                 new ObjectMapper(), properties, meters);
@@ -200,8 +201,103 @@ class EventFanoutTest {
 
     @Test
     void elAvisoDeTiqueteOmiteLosCamposQueNoVienen() throws IOException {
-        var data = EventFanout.data("TicketIssued", new ObjectMapper().readTree("{\"ticketId\":\"t1\",\"qrCode\":\"q\"}"));
+        var data = EventFanout.data(Topics.Kind.TIQUETES,
+                new ObjectMapper().readTree("{\"ticketId\":\"t1\",\"qrCode\":\"q\"}"));
         assertThat(data.toString()).isEqualTo("{\"ticketId\":\"t1\"}");
+    }
+
+    @Test
+    void elAvisoDelPasajeroLlevaSoloIdsYDatosDeLaDecision() throws IOException {
+        var payload = new ObjectMapper().readTree("""
+                {"userId":"u","bookingId":"b","ticketId":"t","itineraryId":"i","causa":"CANCELACION",
+                 "plazoDecision":"2026-11-01T00:00:00Z","opciones":["REUBICAR",{"tipo":"X","email":"e@x.co"}],
+                 "bookingIdNuevo":"b2","qrCode":"QR","email":"a@b.co","numeroDocumento":"123","nombre":"Ana",
+                 "monto":1000,"paymentId":"p"}""");
+
+        var data = EventFanout.data(Topics.Kind.AVISOS, payload);
+
+        assertThat(data.toString()).contains("\"bookingId\":\"b\"", "\"ticketId\":\"t\"", "\"itineraryId\":\"i\"",
+                        "\"causa\":\"CANCELACION\"", "\"plazoDecision\"", "\"REUBICAR\"", "\"bookingIdNuevo\":\"b2\"")
+                .doesNotContain("userId", "qrCode", "QR", "email", "numeroDocumento", "nombre", "Ana", "monto",
+                        "paymentId");
+    }
+
+    @Test
+    void losCanalesDelConductorYDeLaEmpresaConservanConductorIdSinDatosDePasajeros() throws IOException {
+        var payload = new ObjectMapper().readTree("""
+                {"companyId":"c","conductorId":"d","tipo":"SOS","mensaje":"auxilio","motivo":"robo",
+                 "pasajero":{"userId":"u","email":"e","nombre":"Ana"}}""");
+
+        for (Topics.Kind kind : new Topics.Kind[] {Topics.Kind.ALERTAS, Topics.Kind.VIAJE_CONDUCTOR}) {
+            var data = EventFanout.data(kind, payload).toString();
+            assertThat(data).as(kind.name()).contains("\"conductorId\":\"d\"", "auxilio", "robo")
+                    .doesNotContain("userId", "email", "Ana");
+        }
+    }
+
+    @Test
+    void losPublicosQuitanDatosPersonalesYElMotivoDeUnSosPeroNoElNombreDeLasParadas() throws IOException {
+        var payload = new ObjectMapper().readTree("""
+                {"itineraryId":"i","conductorId":"d","email":"e","numeroDocumento":"1","nombre":"Ana",
+                 "qrCode":"q","mensaje":"m","motivo":"Vía en obras",
+                 "paradas":[{"orden":1,"nombre":"Terminal Norte","conductorId":"d2"}],
+                 "alerta":{"tipo":"SOS","motivo":"secreto"}}""");
+
+        var data = EventFanout.sanitize(payload).toString();
+
+        assertThat(data).contains("\"motivo\":\"Vía en obras\"", "\"nombre\":\"Terminal Norte\"", "\"tipo\":\"SOS\"")
+                .doesNotContain("conductorId", "email", "numeroDocumento", "Ana", "qrCode", "mensaje", "secreto");
+    }
+
+    @Test
+    void unAvisoDelPasajeroSinUserIdNoSeDifunde() throws IOException {
+        WebSocketSession raw = raw("pasajero");
+        ClientSession session = new ClientSession(raw, Instant.now());
+        registry.add(session);
+        registry.subscribe(session, "usuario:" + UUID.randomUUID() + ":avisos");
+
+        fanout.onEvent(record("500-0", "RefundProcessed", "{\"bookingId\":\"b\",\"refundId\":\"r\"}"));
+
+        verify(raw, never()).sendMessage(any());
+        assertThat(fanout.lastSeq()).isEqualTo("500-0");
+    }
+
+    @Test
+    void unIdQueNoEsUuidNoSeDifundeAunqueAlguienSigaEseNombre() throws IOException {
+        WebSocketSession raw = raw("raro");
+        ClientSession session = new ClientSession(raw, Instant.now());
+        registry.add(session);
+        // RealtimeHandler nunca lo permitiría (Topics.parse lo rechaza); aquí se fuerza para probar la difusión.
+        registry.subscribe(session, "usuario:no-es-uuid:avisos");
+
+        fanout.onEvent(record("700-0", "TicketUpdated", "{\"userId\":\"NO-ES-UUID\",\"ticketId\":\"t\"}"));
+
+        verify(raw, never()).sendMessage(any());
+        assertThat(delivered()).isZero();
+    }
+
+    @Test
+    void ticketIssuedLlegaATiquetesYAvisosConSuFormatoCadaUno() throws IOException {
+        UUID userId = UUID.randomUUID();
+        WebSocketSession tiquetes = raw("tiquetes");
+        WebSocketSession avisos = raw("avisos");
+        ClientSession a = new ClientSession(tiquetes, Instant.now());
+        ClientSession b = new ClientSession(avisos, Instant.now());
+        registry.add(a);
+        registry.add(b);
+        registry.subscribe(a, "usuario:" + userId + ":tiquetes");
+        registry.subscribe(b, "usuario:" + userId + ":avisos");
+
+        fanout.onEvent(record("600-0", "TicketIssued", """
+                {"bookingId":"b1","ticketId":"t1","qrCode":"QR-SECRETO","itineraryId":"i1",
+                 "seatNumbers":["3"],"userId":"%s","offerId":"o1"}""".formatted(userId)));
+
+        var captor = ArgumentCaptor.forClass(TextMessage.class);
+        verify(avisos).sendMessage(captor.capture());
+        assertThat(captor.getValue().getPayload()).contains("usuario:" + userId + ":avisos", "\"ticketId\":\"t1\"")
+                .doesNotContain("QR-SECRETO", "offerId");
+        verify(tiquetes).sendMessage(any(TextMessage.class));
+        assertThat(delivered()).isEqualTo(2.0);
     }
 
     private ClientSession authenticated(String id, String userId, String jti) {

@@ -25,6 +25,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -34,16 +35,34 @@ import java.util.Set;
  * Lee TODOS los eventos del bus (sin consumer group: cada réplica recibe todo, como un
  * Pub/Sub) y los difunde a las conexiones suscritas al tópico correspondiente (US-021,
  * US-047, US-056). Los tópicos públicos (US-039: los siguen también sesiones anónimas) nunca
- * reciben datos de un pasajero: ni su userId ni los ids de su retención o reserva; tampoco el conductorId
- * (fleet no lo manda, pero se quita por defensa). El aviso privado
+ * reciben datos de una persona: ni el userId, email, documento o nombre de un pasajero, ni los ids de
+ * su retención o reserva, ni el conductorId, ni el texto libre de un SOS. El aviso privado
  * de tiquete (US-033) lleva solo bookingId, ticketId, itineraryId y seatNumbers: nunca qrCode ni userId.
+ * Los avisos del pasajero (US-183) llevan solo identificadores y datos de la decisión. El canal del
+ * conductor y el de alertas de la empresa sí llevan conductorId, pero nunca datos de pasajeros.
+ *
+ * <p>Orden: los eventos se envían en el orden del stream, también un TripAlertRaised CRITICA (SOS,
+ * ACCIDENTE). No hay una cola propia que reordenar: cada envío va directo al buffer del
+ * ConcurrentWebSocketSessionDecorator, así que adelantarlo exigiría reescribir el envío.
  */
 @Component
 public class EventFanout implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(EventFanout.class);
-    private static final Set<String> PRIVATE_FIELDS = Set.of("userId", "holdId", "bookingId", "conductorId");
+    /** Datos de pasajeros: no salen en ningún tópico salvo el propio aviso del pasajero (y ahí solo ids). */
+    private static final Set<String> PERSONAL_FIELDS = Set.of("userId", "holdId", "email", "numeroDocumento", "nombre",
+            "qrCode");
+    /** Lo que se quita de los tópicos públicos, a cualquier profundidad. */
+    private static final Set<String> PRIVATE_FIELDS = union(PERSONAL_FIELDS, Set.of("bookingId", "conductorId", "mensaje"));
+    /** Las paradas (EtaUpdated, posición) tienen nombre de lugar, no de persona: ahí se conserva "nombre". */
+    private static final String STOPS = "paradas";
+    private static final String NAME = "nombre";
+    /** Texto libre de una alerta SOS: se quita si el objeto es un SOS (tipo = SOS). */
+    private static final String SOS_REASON = "motivo";
     private static final List<String> TICKET_NOTICE_FIELDS = List.of("bookingId", "ticketId", "itineraryId", "seatNumbers");
+    private static final List<String> USER_NOTICE_FIELDS = List.of("bookingId", "bookingIdAnterior", "bookingIdNuevo",
+            "ticketId", "ticketIdAnterior", "ticketIdNuevo", "itineraryId", "itineraryIdAnterior", "itineraryIdNuevo",
+            "refundId", "seatNumbers", "cambio", "causa", "plazoDecision", "opciones");
     private static final Set<String> REVOCATIONS = Set.of("SessionRevoked", "UserSuspended");
 
     private final RedisConnectionFactory connectionFactory;
@@ -130,9 +149,16 @@ public class EventFanout implements SmartLifecycle {
                 revoke(type, payload);
                 return;
             }
-            for (String topic : Topics.forEvent(type, payload)) {
+            List<String> topics = Topics.forEvent(type, payload);
+            if (topics.isEmpty() && Topics.isUserNotice(type)) {
+                // Booking debe mandar el userId del dueño: sin él no hay a quién avisar.
+                log.warn("Evento {} {} sin userId: no se difunde", type, fields.get("eventId"));
+            }
+            for (String topic : topics) {
                 Set<ClientSession> subscribers = registry.subscribers(topic);
-                if (subscribers.isEmpty()) {
+                // Un id que no es uuid (p. ej. userId mal formado) da un tópico que nadie puede seguir.
+                Topics.Parsed parsed = Topics.parse(topic);
+                if (subscribers.isEmpty() || parsed == null) {
                     continue;
                 }
                 ObjectNode out = objectMapper.createObjectNode();
@@ -142,7 +168,7 @@ public class EventFanout implements SmartLifecycle {
                 out.put("seq", record.getId().getValue());
                 out.put("eventId", fields.get("eventId"));
                 out.put("occurredAt", fields.get("occurredAt"));
-                out.set("data", data(type, payload));
+                out.set("data", data(parsed.kind(), payload));
                 String json = out.toString();
                 for (ClientSession session : subscribers) {
                     deliver(session, json);
@@ -190,13 +216,23 @@ public class EventFanout implements SmartLifecycle {
         registry.remove(session.id());
     }
 
-    /** Lo que ve el cliente: el aviso de tiquete se arma campo a campo; el resto, sin campos privados. */
-    static JsonNode data(String type, JsonNode payload) {
-        if (!"TicketIssued".equals(type)) {
-            return sanitize(payload);
-        }
+    /**
+     * Lo que ve el cliente según el tópico: los avisos al pasajero se arman campo a campo; el canal del
+     * conductor y el de la empresa, sin datos de pasajeros; los públicos, sin ningún campo privado.
+     */
+    static JsonNode data(Topics.Kind kind, JsonNode payload) {
+        return switch (kind) {
+            case TIQUETES -> pick(payload, TICKET_NOTICE_FIELDS);
+            case AVISOS -> strip(pick(payload, USER_NOTICE_FIELDS), PERSONAL_FIELDS, false);
+            // El operador sí ve el motivo de un SOS.
+            case VIAJE_CONDUCTOR, ALERTAS -> strip(payload.deepCopy(), PERSONAL_FIELDS, false);
+            default -> sanitize(payload);
+        };
+    }
+
+    private static ObjectNode pick(JsonNode payload, List<String> allowed) {
         ObjectNode notice = JsonNodeFactory.instance.objectNode();
-        for (String field : TICKET_NOTICE_FIELDS) {
+        for (String field : allowed) {
             if (payload.has(field)) {
                 notice.set(field, payload.get(field).deepCopy());
             }
@@ -206,25 +242,39 @@ public class EventFanout implements SmartLifecycle {
 
     /** Copia sin campos privados a cualquier profundidad (p. ej. el detalle libre de TripEventReported). */
     static JsonNode sanitize(JsonNode payload) {
-        JsonNode copy = payload.deepCopy();
-        strip(copy);
-        return copy;
+        return strip(payload.deepCopy(), PRIVATE_FIELDS, true);
     }
 
-    private static void strip(JsonNode node) {
+    /** Quita {@code remove} a cualquier profundidad; con {@code hideSosReason}, también el motivo de un SOS. */
+    private static JsonNode strip(JsonNode node, Set<String> remove, boolean hideSosReason) {
         if (node instanceof ObjectNode object) {
+            boolean sos = hideSosReason && "SOS".equals(object.path("tipo").asText());
             Iterator<Map.Entry<String, JsonNode>> fields = object.properties().iterator();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> field = fields.next();
-                if (PRIVATE_FIELDS.contains(field.getKey())) {
+                String key = field.getKey();
+                if (remove.contains(key) || (sos && SOS_REASON.equals(key))) {
                     fields.remove();
                 } else {
-                    strip(field.getValue());
+                    strip(field.getValue(), STOPS.equals(key) ? without(remove, NAME) : remove, hideSosReason);
                 }
             }
         } else if (node instanceof ArrayNode array) {
-            array.forEach(EventFanout::strip);
+            array.forEach(item -> strip(item, remove, hideSosReason));
         }
+        return node;
+    }
+
+    private static Set<String> without(Set<String> fields, String field) {
+        Set<String> copy = new HashSet<>(fields);
+        copy.remove(field);
+        return copy;
+    }
+
+    private static Set<String> union(Set<String> a, Set<String> b) {
+        Set<String> all = new HashSet<>(a);
+        all.addAll(b);
+        return Set.copyOf(all);
     }
 
     @Override
