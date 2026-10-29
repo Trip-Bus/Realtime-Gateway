@@ -123,7 +123,8 @@ public class RealtimeHandler extends TextWebSocketHandler {
      * (US-104, {@code tripbus:suspended:{sub}}) ⇒ ACCOUNT_SUSPENDED y el mismo cierre 4401.
      */
     private void authenticate(ClientSession session, Jwt jwt) {
-        session.authenticate(jwt.getSubject(), jwt.getId(), jwt.getClaimAsString("role"), jwt.getExpiresAt());
+        session.authenticate(jwt.getSubject(), jwt.getId(), jwt.getClaimAsString("role"),
+                jwt.getClaimAsString("companyId"), jwt.getExpiresAt());
         if (revocations.isRevoked(jwt.getId())) {
             reject(session, "UNAUTHENTICATED", "La sesión fue cerrada; inicie sesión de nuevo");
             return;
@@ -137,6 +138,7 @@ public class RealtimeHandler extends TextWebSocketHandler {
         out.put("userId", jwt.getSubject());
         out.put("role", jwt.getClaimAsString("role"));
         out.put("heartbeatSeconds", properties.heartbeatInterval().toSeconds());
+        out.put("maxSubscriptions", properties.maxSubscriptionsFor(session.role()));
         if (jwt.getExpiresAt() != null) {
             out.put("tokenExpiresAt", jwt.getExpiresAt().toString());
         }
@@ -183,12 +185,13 @@ public class RealtimeHandler extends TextWebSocketHandler {
             sendError(session, "FORBIDDEN_TOPIC", "Tópico no disponible sin cuenta: " + topic);
             return;
         }
-        // Tema privado (US-033): solo su dueño, sin excepción por rol.
-        if (parsed.kind() == Topics.Kind.TIQUETES && !Topics.isOwnedBy(parsed, session.userId())) {
-            sendError(session, "FORBIDDEN_TOPIC", "Tópico de otro usuario: " + topic);
+        // Temas privados (US-033, US-183, US-186): dueño, rol y empresa según Topics.canSubscribe.
+        if (!Topics.canSubscribe(parsed, session.userId(), session.role(), session.companyId())) {
+            sendError(session, "FORBIDDEN_TOPIC", "Tópico no autorizado para esta sesión: " + topic);
             return;
         }
-        int max = session.anonymous() ? properties.maxAnonymousSubscriptions() : properties.maxSubscriptions();
+        int max = session.anonymous() ? properties.maxAnonymousSubscriptions()
+                : properties.maxSubscriptionsFor(session.role());
         if (!session.topics().contains(topic) && session.topics().size() >= max) {
             sendError(session, "TOO_MANY_SUBSCRIPTIONS", "Máximo " + max + " suscripciones");
             return;

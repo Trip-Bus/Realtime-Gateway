@@ -7,7 +7,7 @@ envía el snapshot inicial y difunde los eventos. **No tiene lógica de negocio 
 
 **Stack:** Java 21 · Spring Boot 3.5.16 · Redis 7
 
-**HU:** US-020, US-021, US-033 (aviso de tiquete), US-039 (seguimiento público), US-047 (parte), US-056 (parte) · **Puerto:** 18007 · **BD:** ninguna (solo Redis)
+**HU:** US-020, US-021, US-033 (aviso de tiquete), US-039 (seguimiento público), US-047 (parte), US-056 (parte), US-183 (avisos del pasajero), US-186 (canal del conductor) · **Puerto:** 18007 · **BD:** ninguna (solo Redis)
 
 ## Protocolo
 
@@ -57,18 +57,23 @@ ruta). Detrás del gateway, la autenticación depende solo del JWT y el `Origin`
 |---|---|---|---|
 | `itinerario:{id}:asientos` | Público | `SeatHeld`, `SeatReleased`, `SeatSold`, `HoldExpired`, `SeatStateChanged` | Mapa de asientos (seat-inventory) |
 | `oferta:{id}:cupo` | Público | `OfferQuotaUpdated`, `OfferClosed`, `OfferSoldOut`, `OfferActivated` | Cupo (flash-offers) |
-| `viaje:{id}:eventos` | Público | `TripEventReported` | Línea de tiempo (fleet) |
-| `viaje:{id}:posicion` | Público | `PositionUpdated` (con `itineraryId`), `TrackingStatusChanged` (`ACTIVO`, `EN_PAUSA`, `SIN_SENAL`, `FINALIZADO`) | `GET {fleet}/itineraries/{id}/bus-position`: posición, estado, paradas, `estadoRastreo` y `ultimaPosicionEn` (US-173/US-174) |
+| `viaje:{id}:eventos` | Público | `TripEventReported` (incluye `AVERIA`, `ACCIDENTE`, `VIA_CERRADA`; nunca `SOS`), `ItineraryRescheduled` | Línea de tiempo (fleet) |
+| `viaje:{id}:posicion` | Público | `PositionUpdated` (con `itineraryId`), `TrackingStatusChanged` (`ACTIVO`, `EN_PAUSA`, `SIN_SENAL`, `FINALIZADO`), `EtaUpdated` | `GET {fleet}/itineraries/{id}/bus-position`: posición, estado, paradas, `estadoRastreo` y `ultimaPosicionEn` (US-173/US-174) |
 | `bus:{id}:posicion` | Público — **deprecado** | `PositionUpdated` | Última posición (fleet) |
 | `usuario:{uuid}:tiquetes` | **Privado**: solo la sesión autenticada cuyo `userId` es `{uuid}` | `TicketIssued` (US-033) | Ninguno: solo `subscribed` |
+| `usuario:{uuid}:avisos` | **Privado**: solo la sesión cuyo `userId` es `{uuid}` (ni ADMIN) | `BookingAffected`, `BookingRelocated`, `RefundProcessed`, `TicketRescheduled`, `TicketUpdated`, `TicketIssued` (US-183) | Ninguno: la app pide `GET /bookings/affected` |
+| `conductor:{uuid}:viaje` | **Privado**: solo la sesión cuyo `userId` es `{uuid}` y con rol `CONDUCTOR` | `DriverAssigned`, `DriverUnassigned`, `DriverAssignmentConflict` (US-186) | Ninguno: solo `subscribed` |
+| `empresa:{uuid}:alertas` | **Privado**: `OPERADOR` cuyo claim `companyId` es `{uuid}`, o `ADMIN` (cualquier empresa) | `TripAlertRaised`, `TripAlertResolved`, `TripInterrupted`, `DriverAssignmentConflict`, `TrackingStatusChanged` solo con estado `SIN_SENAL` | Ninguno: la app pide `GET /alerts?estado=ABIERTA` |
 
 - **`viaje:{id}:posicion`** (`{id}` = itinerario) es el tópico para seguir el bus de un viaje: trae la
   posición y el estado del rastreo. **`bus:{id}:posicion` está deprecado:** `PositionUpdated` se sigue
   difundiendo ahí para no romper al frontend actual, pero los clientes nuevos deben usar
   `viaje:{id}:posicion`; se quitará cuando el frontend haya migrado.
-- **Públicos:** los sigue cualquier sesión, también la anónima. Nunca llevan datos de pasajeros:
-  `userId`, `holdId`, `bookingId` y `conductorId` se quitan de los eventos a cualquier profundidad
-  (`EventFanout`).
+- **Públicos:** los sigue cualquier sesión, también la anónima. Nunca llevan datos de personas:
+  `userId`, `holdId`, `bookingId`, `conductorId`, `email`, `numeroDocumento`, `nombre`, `qrCode` y
+  `mensaje` se quitan de los eventos a cualquier profundidad (`EventFanout`), y el `motivo` de un
+  objeto con `tipo: SOS`. Excepción: `nombre` se conserva dentro de `paradas` (es el nombre de la
+  parada en `EtaUpdated`). `TripAlertRaised` nunca se difunde a un tópico público.
 - **Privado `usuario:{uuid}:tiquetes`:** aviso en vivo al comprador cuando booking emite su tiquete.
   Un anónimo u otro usuario (ADMIN incluido) ⇒ `FORBIDDEN_TOPIC` sin cerrar la conexión. El `data`
   lleva **solo** `bookingId`, `ticketId`, `itineraryId` y `seatNumbers` (nunca `qrCode` ni `userId`);
@@ -79,6 +84,47 @@ ws.send(JSON.stringify({ type: "subscribe", topic: `usuario:${userId}:tiquetes` 
 // servidor → {"type":"event","topic":"usuario:…:tiquetes","event":"TicketIssued",
 //             "data":{"bookingId":…,"ticketId":…,"itineraryId":…,"seatNumbers":["5"]}}
 ```
+
+- **Privado `usuario:{uuid}:avisos` (US-183):** avisos de las reservas del pasajero. Booking los
+  manda con el `userId` del dueño; **sin `userId` no se difunden** (queda un WARN en el log). El `data`
+  lleva solo identificadores y datos de la decisión (`bookingId`, `ticketId`, `itineraryId` y sus
+  variantes `…Anterior`/`…Nuevo`, `refundId`, `seatNumbers`, `cambio`, `causa`, `plazoDecision`,
+  `opciones`); nunca `qrCode`, `email`, documento, nombre ni montos.
+
+```js
+ws.send(JSON.stringify({ type: "subscribe", topic: `usuario:${userId}:avisos` }));
+// servidor → {"type":"subscribed",...}   (sin snapshot: la app llama GET /bookings/affected)
+// servidor → {"type":"event","topic":"usuario:…:avisos","event":"BookingAffected",
+//             "data":{"bookingId":…,"ticketId":…,"itineraryId":…,"causa":"CANCELACION",
+//                     "plazoDecision":"…","opciones":["REUBICAR","REEMBOLSO"]}}
+```
+
+- **Privado `conductor:{uuid}:viaje` (US-186):** asignaciones del conductor. Solo el propio usuario
+  y con rol `CONDUCTOR` (otro rol con el mismo uuid, otro conductor o un ADMIN ⇒ `FORBIDDEN_TOPIC`).
+
+```js
+ws.send(JSON.stringify({ type: "subscribe", topic: `conductor:${userId}:viaje` }));
+// servidor → {"type":"event","topic":"conductor:…:viaje","event":"DriverAssigned",
+//             "data":{"itineraryId":…,"companyId":…,"conductorId":…,"rol":"PRINCIPAL"}}
+```
+
+- **Privado `empresa:{uuid}:alertas`:** alertas de los viajes de la empresa para el operador. Aquí
+  sí van `conductorId` y el `mensaje` del SOS; nunca datos de pasajeros. `TripAlertRaised` de gravedad
+  `CRITICA` (SOS, ACCIDENTE) se envía **en el orden normal** del stream: el envío va directo al buffer
+  de cada sesión (`ConcurrentWebSocketSessionDecorator`) y no hay una cola propia que se pueda
+  reordenar sin reescribirlo.
+
+```js
+ws.send(JSON.stringify({ type: "subscribe", topic: `empresa:${companyId}:alertas` }));
+// servidor → {"type":"subscribed",...}   (sin snapshot: la app llama GET /alerts?estado=ABIERTA)
+// servidor → {"type":"event","topic":"empresa:…:alertas","event":"TripAlertRaised",
+//             "data":{"alertId":…,"itineraryId":…,"tipo":"SOS","gravedad":"CRITICA","mensaje":…}}
+```
+
+**Límite de suscripciones por sesión:** `max-subscriptions` (20) para las autenticadas,
+`max-staff-subscriptions` (20; sin valor, igual a `max-subscriptions`) para `OPERADOR` y `ADMIN`, que
+siguen varios viajes y su canal de alertas, y `max-anonymous-subscriptions` (5) para las anónimas. El
+`connected` de una sesión autenticada trae su `maxSubscriptions`; superarlo ⇒ `TOO_MANY_SUBSCRIPTIONS`.
 
 Token inválido en `connect` ⇒ `INVALID_TOKEN` y cierre 4401 (en `?token=`, si está permitido, ⇒ 401
 en el handshake); token vencido ⇒ cierre 4401 (el cliente reconecta con uno nuevo), también con
@@ -138,8 +184,8 @@ ws.send(JSON.stringify({ type: "subscribe", topic: `viaje:${itineraryId}:posicio
   `bus:{id}:posicion` (deprecado), `viaje:{id}:eventos`, `oferta:{id}:cupo`, `itinerario:{id}:asientos`. Otro tema ⇒ error
   `FORBIDDEN_TOPIC` sin cerrar la conexión.
 - Máximo **5 suscripciones** a la vez (`tripbus.realtime.max-anonymous-subscriptions`); la sexta ⇒
-  `TOO_MANY_SUBSCRIPTIONS`. Las sesiones autenticadas siguen con `max-subscriptions` (20), los temas
-  públicos y su propio `usuario:{uuid}:tiquetes`.
+  `TOO_MANY_SUBSCRIPTIONS`. Las sesiones autenticadas siguen con su propio límite (arriba), los temas
+  públicos y los privados que les correspondan.
 - Recibe el mismo snapshot y los mismos eventos que una sesión autenticada. Los snapshots se piden sin
   usuario (el mapa de asientos solo dice el estado de cada puesto, `propio` siempre `false`) y los
   eventos van sin ids de pasajeros ni de reservas.

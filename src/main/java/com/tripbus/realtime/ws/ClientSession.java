@@ -24,6 +24,7 @@ public class ClientSession {
     private volatile String jti;
     private volatile boolean anonymous;
     private volatile String role;
+    private volatile String companyId;
     private volatile Instant tokenExpiresAt;
     private volatile Instant lastSeen;
 
@@ -57,10 +58,16 @@ public class ClientSession {
     }
 
     public void authenticate(String userId, String jti, String role, Instant expiresAt) {
+        authenticate(userId, jti, role, null, expiresAt);
+    }
+
+    /** companyId: claim del JWT de un OPERADOR (empresa:{uuid}:alertas); null en los demás roles. */
+    public void authenticate(String userId, String jti, String role, String companyId, Instant expiresAt) {
         this.anonymous = false;
         this.userId = userId;
         this.jti = jti;
         this.role = role;
+        this.companyId = companyId;
         this.tokenExpiresAt = expiresAt;
     }
 
@@ -117,6 +124,10 @@ public class ClientSession {
 
     public String role() {
         return role;
+    }
+
+    public String companyId() {
+        return companyId;
     }
 
     public Instant tokenExpiresAt() {

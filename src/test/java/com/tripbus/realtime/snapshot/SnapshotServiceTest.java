@@ -39,7 +39,7 @@ class SnapshotServiceTest {
         });
         server.start();
         String url = "http://localhost:" + server.getAddress().getPort();
-        snapshots = new SnapshotService(new RealtimeProperties(null, null, null, null, null, null, 0, 0,
+        snapshots = new SnapshotService(new RealtimeProperties(null, null, null, null, null, null, 0, 0, 0,
                 url, url, url, null, false));
     }
 
