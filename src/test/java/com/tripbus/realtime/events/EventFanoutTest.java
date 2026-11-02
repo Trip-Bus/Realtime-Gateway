@@ -19,8 +19,10 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.SessionLimitExceededException;
 
 import java.io.IOException;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -201,7 +203,7 @@ class EventFanoutTest {
 
     @Test
     void elAvisoDeTiqueteOmiteLosCamposQueNoVienen() throws IOException {
-        var data = EventFanout.data(Topics.Kind.TIQUETES,
+        var data = EventFanout.data(Topics.Kind.TIQUETES, "TicketIssued",
                 new ObjectMapper().readTree("{\"ticketId\":\"t1\",\"qrCode\":\"q\"}"));
         assertThat(data.toString()).isEqualTo("{\"ticketId\":\"t1\"}");
     }
@@ -214,7 +216,7 @@ class EventFanoutTest {
                  "bookingIdNuevo":"b2","qrCode":"QR","email":"a@b.co","numeroDocumento":"123","nombre":"Ana",
                  "monto":1000,"paymentId":"p"}""");
 
-        var data = EventFanout.data(Topics.Kind.AVISOS, payload);
+        var data = EventFanout.data(Topics.Kind.AVISOS, "BookingAffected", payload);
 
         assertThat(data.toString()).contains("\"bookingId\":\"b\"", "\"ticketId\":\"t\"", "\"itineraryId\":\"i\"",
                         "\"causa\":\"CANCELACION\"", "\"plazoDecision\"", "\"REUBICAR\"", "\"bookingIdNuevo\":\"b2\"")
@@ -229,7 +231,7 @@ class EventFanoutTest {
                  "pasajero":{"userId":"u","email":"e","nombre":"Ana"}}""");
 
         for (Topics.Kind kind : new Topics.Kind[] {Topics.Kind.ALERTAS, Topics.Kind.VIAJE_CONDUCTOR}) {
-            var data = EventFanout.data(kind, payload).toString();
+            var data = EventFanout.data(kind, "TripAlertRaised", payload).toString();
             assertThat(data).as(kind.name()).contains("\"conductorId\":\"d\"", "auxilio", "robo")
                     .doesNotContain("userId", "email", "Ana");
         }
@@ -378,5 +380,124 @@ class EventFanoutTest {
         fanout.onEvent(record("400-1", "UserSuspended", "{\"userId\":\" \"}"));
 
         assertThat(registry.get("a")).isNotNull();
+    }
+
+    /** Un EventFanout cuyo reloj devuelve, en orden, los instantes dados. */
+    private EventFanout fanoutAt(Instant first, Instant... rest) {
+        Clock clock = mock(Clock.class);
+        when(clock.instant()).thenReturn(first, rest);
+        RealtimeProperties properties = new RealtimeProperties(null, null, null, null, null, null, 0, 0, 0,
+                null, null, null, null, false);
+        return new EventFanout(mock(RedisConnectionFactory.class), mock(StringRedisTemplate.class), registry,
+                new ObjectMapper(), properties, meters, clock);
+    }
+
+    private WebSocketSession subscribed(String id, String topicName) {
+        WebSocketSession raw = raw(id);
+        ClientSession session = new ClientSession(raw, Instant.now());
+        registry.add(session);
+        registry.subscribe(session, topicName);
+        return raw;
+    }
+
+    private static List<String> sent(WebSocketSession raw, int times) throws IOException {
+        var captor = ArgumentCaptor.forClass(TextMessage.class);
+        verify(raw, times(times)).sendMessage(captor.capture());
+        return captor.getAllValues().stream().map(TextMessage::getPayload).toList();
+    }
+
+    @Test
+    void laVitrinaRecibeComoMaximoUnCupoPorSegundoPorOfertaYElCupoDeLaOfertaTodos() throws IOException {
+        UUID offer = UUID.randomUUID();
+        UUID otra = UUID.randomUUID();
+        WebSocketSession vitrina = subscribed("vitrina", "ofertas:activas");
+        WebSocketSession cupo = subscribed("cupo", "oferta:" + offer + ":cupo");
+        Instant t0 = Instant.parse("2026-11-02T10:00:00Z");
+        EventFanout limitado = fanoutAt(t0, t0.plusMillis(400), t0.plusMillis(500), t0.plusMillis(1000));
+        String quota = "{\"offerId\":\"%s\",\"cupoRestante\":%d}";
+
+        limitado.onEvent(record("1-0", "OfferQuotaUpdated", quota.formatted(offer, 9)));
+        limitado.onEvent(record("1-1", "OfferQuotaUpdated", quota.formatted(offer, 8)));
+        limitado.onEvent(record("1-2", "OfferQuotaUpdated", quota.formatted(otra, 5)));
+        limitado.onEvent(record("1-3", "OfferQuotaUpdated", quota.formatted(offer, 7)));
+        // Los demás eventos de la oferta no tienen límite (y no consultan el reloj).
+        limitado.onEvent(record("1-4", "OfferSoldOut", "{\"offerId\":\"%s\",\"origen\":\"Bogotá\"}".formatted(offer)));
+
+        assertThat(sent(vitrina, 4)).satisfiesExactly(
+                m -> assertThat(m).contains("\"cupoRestante\":9"),
+                m -> assertThat(m).contains("\"cupoRestante\":5"),
+                m -> assertThat(m).contains("\"cupoRestante\":7"),
+                m -> assertThat(m).contains("OfferSoldOut", "Bogotá", "\"topic\":\"ofertas:activas\""));
+        assertThat(sent(cupo, 4)).hasSize(4);
+    }
+
+    @Test
+    void laFlotaRecibeComoMaximoUnaPosicionCada3sPorViajeYTodoLoDemas() throws IOException {
+        UUID company = UUID.randomUUID();
+        UUID viajeA = UUID.randomUUID();
+        UUID viajeB = UUID.randomUUID();
+        WebSocketSession flota = subscribed("flota", "empresa:" + company + ":flota");
+        WebSocketSession publico = subscribed("publico", "viaje:" + viajeA + ":posicion");
+        Instant t0 = Instant.parse("2026-11-02T10:00:00Z");
+        EventFanout limitado = fanoutAt(t0, t0.plusSeconds(1), t0.plusSeconds(1), t0.plusMillis(2999),
+                t0.plusSeconds(3));
+        String pos = "{\"itineraryId\":\"%s\",\"companyId\":\"" + company + "\",\"lat\":%d,\"conductorId\":\"d1\","
+                + "\"email\":\"e@x.co\"}";
+        String otro = "{\"itineraryId\":\"%s\",\"companyId\":\"%s\",%s}";
+
+        limitado.onEvent(record("2-0", "PositionUpdated", pos.formatted(viajeA, 1)));
+        limitado.onEvent(record("2-1", "PositionUpdated", pos.formatted(viajeA, 2)));
+        limitado.onEvent(record("2-2", "PositionUpdated", pos.formatted(viajeB, 3)));
+        limitado.onEvent(record("2-3", "EtaUpdated", otro.formatted(viajeA, company, "\"retrasoMinutos\":4")));
+        limitado.onEvent(record("2-4", "TrackingStatusChanged", otro.formatted(viajeA, company, "\"estado\":\"EN_PAUSA\"")));
+        limitado.onEvent(record("2-5", "PositionUpdated", pos.formatted(viajeA, 4)));
+        limitado.onEvent(record("2-6", "PositionUpdated", pos.formatted(viajeA, 5)));
+
+        assertThat(sent(flota, 5)).satisfiesExactly(
+                m -> assertThat(m).contains("\"lat\":1", "\"conductorId\":\"d1\"").doesNotContain("e@x.co"),
+                m -> assertThat(m).contains("\"lat\":3"),
+                m -> assertThat(m).contains("EtaUpdated"),
+                m -> assertThat(m).contains("EN_PAUSA"),
+                m -> assertThat(m).contains("\"lat\":5"));
+        // El tópico público del viaje recibe todas sus posiciones (4), la ETA y el estado.
+        assertThat(sent(publico, 6)).noneMatch(m -> m.contains("conductorId"));
+    }
+
+    @Test
+    void losAvisosNuevosLlevanSusDatosSinRetencionNiOtrosTurnos() throws IOException {
+        var mapper = new ObjectMapper();
+        var ofrecido = EventFanout.data(Topics.Kind.AVISOS, "WaitlistSeatOffered", mapper.readTree("""
+                {"userId":"u","itineraryId":"i","holdId":"h-secreto","seatNumbers":["3"],
+                 "expiraEn":"2026-11-02T10:15:00Z"}""")).toString();
+        assertThat(ofrecido).contains("\"itineraryId\":\"i\"", "\"seatNumbers\":[\"3\"]", "\"expiraEn\"")
+                .doesNotContain("holdId", "h-secreto", "userId");
+
+        var cerrada = EventFanout.data(Topics.Kind.AVISOS, "WaitlistClosed",
+                mapper.readTree("{\"itineraryId\":\"i\",\"userIds\":[\"u1\",\"u2\"]}")).toString();
+        assertThat(cerrada).isEqualTo("{\"itineraryId\":\"i\"}");
+
+        var alerta = EventFanout.data(Topics.Kind.AVISOS, "OfferAlert", mapper.readTree("""
+                {"userId":"u","offerId":"o","origen":"Bogotá","destino":"Tunja","precioOferta":30000,
+                 "inicio":"a","fin":"b","email":"e@x.co"}""")).toString();
+        assertThat(alerta).contains("\"offerId\":\"o\"", "Bogotá", "Tunja", "30000", "\"inicio\"", "\"fin\"")
+                .doesNotContain("email", "userId");
+
+        var noShow = EventFanout.data(Topics.Kind.AVISOS, "TicketNoShow", mapper.readTree(
+                "{\"userId\":\"u\",\"bookingId\":\"b\",\"ticketId\":\"t\",\"itineraryId\":\"i\"}")).toString();
+        assertThat(noShow).isEqualTo("{\"bookingId\":\"b\",\"ticketId\":\"t\",\"itineraryId\":\"i\"}");
+    }
+
+    @Test
+    void waitlistClosedLlegaACadaTurnoSinLosDemasUserIds() throws IOException {
+        UUID uno = UUID.randomUUID();
+        UUID dos = UUID.randomUUID();
+        WebSocketSession primero = subscribed("uno", "usuario:" + uno + ":avisos");
+        WebSocketSession segundo = subscribed("dos", "usuario:" + dos + ":avisos");
+
+        fanout.onEvent(record("3-0", "WaitlistClosed", "{\"itineraryId\":\"i\",\"userIds\":[\"%s\",\"%s\"]}"
+                .formatted(uno, dos)));
+
+        assertThat(sent(primero, 1).get(0)).contains("usuario:" + uno + ":avisos").doesNotContain(dos.toString());
+        assertThat(sent(segundo, 1).get(0)).contains("usuario:" + dos + ":avisos").doesNotContain(uno.toString());
     }
 }

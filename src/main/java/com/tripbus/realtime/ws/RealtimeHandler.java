@@ -43,6 +43,8 @@ public class RealtimeHandler extends TextWebSocketHandler {
     public static final CloseStatus HEARTBEAT_TIMEOUT = new CloseStatus(4408, "Sin heartbeat");
 
     private static final Logger log = LoggerFactory.getLogger(RealtimeHandler.class);
+    private static final String UNAUTHENTICATED = "UNAUTHENTICATED";
+    private static final String SESSION_CLOSED = "La sesión fue cerrada; inicie sesión de nuevo";
 
     private final SessionRegistry registry;
     private final SnapshotService snapshots;
@@ -120,17 +122,23 @@ public class RealtimeHandler extends TextWebSocketHandler {
      * Token revocado por logout (US-006) ⇒ UNAUTHENTICATED y cierre 4401. La sesión guarda el jti
      * ANTES de consultar la revocación: un SessionRevoked que llegue entre la consulta y el registro
      * igual la encuentra (identity guarda la clave antes de publicar el evento). Cuenta suspendida
-     * (US-104, {@code tripbus:suspended:{sub}}) ⇒ ACCOUNT_SUSPENDED y el mismo cierre 4401.
+     * (US-104, {@code tripbus:suspended:{sub}}) ⇒ ACCOUNT_SUSPENDED y el mismo cierre 4401. Token
+     * emitido antes de un cambio de contraseña (US-129, {@code tripbus:pwd-changed:{sub}}) ⇒ igual que
+     * uno revocado.
      */
     private void authenticate(ClientSession session, Jwt jwt) {
         session.authenticate(jwt.getSubject(), jwt.getId(), jwt.getClaimAsString("role"),
-                jwt.getClaimAsString("companyId"), jwt.getExpiresAt());
+                jwt.getClaimAsString("companyId"), jwt.getIssuedAt(), jwt.getExpiresAt());
         if (revocations.isRevoked(jwt.getId())) {
-            reject(session, "UNAUTHENTICATED", "La sesión fue cerrada; inicie sesión de nuevo");
+            reject(session, UNAUTHENTICATED, SESSION_CLOSED);
             return;
         }
         if (revocations.isSuspended(jwt.getSubject())) {
             reject(session, "ACCOUNT_SUSPENDED", "La cuenta está suspendida");
+            return;
+        }
+        if (revocations.isPasswordChangedSince(jwt.getSubject(), jwt.getIssuedAt())) {
+            reject(session, UNAUTHENTICATED, SESSION_CLOSED);
             return;
         }
         ObjectNode out = objectMapper.createObjectNode();
@@ -171,7 +179,7 @@ public class RealtimeHandler extends TextWebSocketHandler {
 
     private void subscribe(ClientSession session, String rawTopic) {
         if (!session.identified()) {
-            sendError(session, "UNAUTHENTICATED",
+            sendError(session, UNAUTHENTICATED,
                     "Primero envíe {\"type\":\"connect\"} (con \"token\" para una sesión autenticada)");
             return;
         }
@@ -244,8 +252,9 @@ public class RealtimeHandler extends TextWebSocketHandler {
     // ------------------------------------------------------------------ heartbeat
 
     /**
-     * Ping cada 20 s; si no hay respuesta en 45 s se cierra. Token vencido → reconectar. Las
-     * sesiones anónimas no tienen token: solo las cierra la falta de heartbeat.
+     * Ping cada 20 s; si no hay respuesta en 45 s se cierra. Token vencido → reconectar. Contraseña
+     * cambiada después de emitido el token (US-129) → UNAUTHENTICATED y 4401. Las sesiones anónimas no
+     * tienen token: solo las cierra la falta de heartbeat.
      */
     @org.springframework.scheduling.annotation.Scheduled(fixedDelayString = "${tripbus.realtime.heartbeat-interval-ms:20000}")
     public void heartbeat() {
@@ -259,18 +268,29 @@ public class RealtimeHandler extends TextWebSocketHandler {
                 }
                 continue;
             }
-            if (session.lastSeen().plus(properties.heartbeatTimeout()).isBefore(now)) {
-                session.close(HEARTBEAT_TIMEOUT);
-                registry.remove(session.id());
-                continue;
+            if (stillValid(session, now)) {
+                session.send("{\"type\":\"ping\"}");
             }
-            if (session.tokenExpiresAt() != null && session.tokenExpiresAt().isBefore(now)) {
-                sendError(session, "TOKEN_EXPIRED", "El token expiró; reconecte con uno nuevo");
-                session.close(UNAUTHORIZED);
-                registry.remove(session.id());
-                continue;
-            }
-            session.send("{\"type\":\"ping\"}");
         }
+    }
+
+    /** Cierra la sesión identificada si ya no vale (sin heartbeat, token vencido o viejo); true si sigue. */
+    private boolean stillValid(ClientSession session, Instant now) {
+        if (session.lastSeen().plus(properties.heartbeatTimeout()).isBefore(now)) {
+            session.close(HEARTBEAT_TIMEOUT);
+            registry.remove(session.id());
+            return false;
+        }
+        if (session.tokenExpiresAt() != null && session.tokenExpiresAt().isBefore(now)) {
+            reject(session, "TOKEN_EXPIRED", "El token expiró; reconecte con uno nuevo");
+            return false;
+        }
+        // US-129: una sola consulta a Redis por sesión autenticada y heartbeat.
+        if (session.authenticated()
+                && revocations.isPasswordChangedSince(session.userId(), session.tokenIssuedAt())) {
+            reject(session, UNAUTHENTICATED, SESSION_CLOSED);
+            return false;
+        }
+        return true;
     }
 }

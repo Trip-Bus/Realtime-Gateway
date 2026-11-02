@@ -56,14 +56,16 @@ ruta). Detrás del gateway, la autenticación depende solo del JWT y el `Origin`
 | Tópico | Acceso | Eventos | Snapshot |
 |---|---|---|---|
 | `itinerario:{id}:asientos` | Público | `SeatHeld`, `SeatReleased`, `SeatSold`, `HoldExpired`, `SeatStateChanged` | Mapa de asientos (seat-inventory) |
-| `oferta:{id}:cupo` | Público | `OfferQuotaUpdated`, `OfferClosed`, `OfferSoldOut`, `OfferActivated` | Cupo (flash-offers) |
+| `oferta:{id}:cupo` | Público | `OfferQuotaUpdated` (todos), `OfferClosed`, `OfferSoldOut`, `OfferActivated` | Cupo (flash-offers) |
+| `ofertas:activas` | Público (único tópico **sin id**) | `OfferCreated`, `OfferActivated`, `OfferUpdated`, `OfferClosed`, `OfferSoldOut` (con `origen` y `destino`), `OfferQuotaUpdated` **como máximo uno por segundo por oferta** (US-160) | `GET {flash-offers}/offers/showcase`: primera página de la vitrina |
 | `viaje:{id}:eventos` | Público | `TripEventReported` (incluye `AVERIA`, `ACCIDENTE`, `VIA_CERRADA`; nunca `SOS`), `ItineraryRescheduled` | Línea de tiempo (fleet) |
 | `viaje:{id}:posicion` | Público | `PositionUpdated` (con `itineraryId`), `TrackingStatusChanged` (`ACTIVO`, `EN_PAUSA`, `SIN_SENAL`, `FINALIZADO`), `EtaUpdated` | `GET {fleet}/itineraries/{id}/bus-position`: posición, estado, paradas, `estadoRastreo` y `ultimaPosicionEn` (US-173/US-174) |
 | `bus:{id}:posicion` | Público — **deprecado** | `PositionUpdated` | Última posición (fleet) |
 | `usuario:{uuid}:tiquetes` | **Privado**: solo la sesión autenticada cuyo `userId` es `{uuid}` | `TicketIssued` (US-033) | Ninguno: solo `subscribed` |
-| `usuario:{uuid}:avisos` | **Privado**: solo la sesión cuyo `userId` es `{uuid}` (ni ADMIN) | `BookingAffected`, `BookingRelocated`, `RefundProcessed`, `TicketRescheduled`, `TicketUpdated`, `TicketIssued` (US-183) | Ninguno: la app pide `GET /bookings/affected` |
+| `usuario:{uuid}:avisos` | **Privado**: solo la sesión cuyo `userId` es `{uuid}` (ni ADMIN) | `BookingAffected`, `BookingRelocated`, `RefundProcessed`, `TicketRescheduled`, `TicketUpdated`, `TicketIssued` (US-183), `WaitlistSeatOffered` y `WaitlistClosed` (US-140), `TicketNoShow` (US-153), `OfferAlert` (US-161) | Ninguno: la app pide `GET /bookings/affected` |
 | `conductor:{uuid}:viaje` | **Privado**: solo la sesión cuyo `userId` es `{uuid}` y con rol `CONDUCTOR` | `DriverAssigned`, `DriverUnassigned`, `DriverAssignmentConflict` (US-186) | Ninguno: solo `subscribed` |
 | `empresa:{uuid}:alertas` | **Privado**: `OPERADOR` cuyo claim `companyId` es `{uuid}`, o `ADMIN` (cualquier empresa) | `TripAlertRaised`, `TripAlertResolved`, `TripInterrupted`, `DriverAssignmentConflict`, `TrackingStatusChanged` solo con estado `SIN_SENAL` | Ninguno: la app pide `GET /alerts?estado=ABIERTA` |
+| `empresa:{uuid}:flota` | **Privado**: igual que `empresa:{uuid}:alertas` | `PositionUpdated` **como máximo una cada 3 s por viaje**, `EtaUpdated`, `TrackingStatusChanged` (todos los estados), por `companyId` (US-178) | Ninguno: la app pide `GET /fleet/live` |
 
 - **`viaje:{id}:posicion`** (`{id}` = itinerario) es el tópico para seguir el bus de un viaje: trae la
   posición y el estado del rastreo. **`bus:{id}:posicion` está deprecado:** `PositionUpdated` se sigue
@@ -74,6 +76,19 @@ ruta). Detrás del gateway, la autenticación depende solo del JWT y el `Origin`
   `mensaje` se quitan de los eventos a cualquier profundidad (`EventFanout`), y el `motivo` de un
   objeto con `tipo: SOS`. Excepción: `nombre` se conserva dentro de `paradas` (es el nombre de la
   parada en `EtaUpdated`). `TripAlertRaised` nunca se difunde a un tópico público.
+- **Límites de frecuencia** (por réplica, en memoria): en `ofertas:activas` pasa como máximo un
+  `OfferQuotaUpdated` por segundo por oferta y en `empresa:{uuid}:flota` una `PositionUpdated` cada
+  3 s por viaje (`itineraryId`); los demás dentro de esa ventana **se descartan**, no se encolan.
+  `oferta:{id}:cupo` y `viaje:{id}:posicion` siguen recibiéndolos todos: para el valor exacto, ese tópico.
+  Los demás eventos de la vitrina y de la flota no tienen límite.
+
+```js
+ws.send(JSON.stringify({ type: "connect" }));                         // también sin cuenta
+ws.send(JSON.stringify({ type: "subscribe", topic: "ofertas:activas" }));
+// servidor → {"type":"snapshot","topic":"ofertas:activas","asOfSeq":…,"data":{…primera página de /offers/showcase…}}
+// servidor → {"type":"event","topic":"ofertas:activas","event":"OfferActivated",
+//             "data":{"offerId":…,"origen":"Bogotá","destino":"Tunja",…}}
+```
 - **Privado `usuario:{uuid}:tiquetes`:** aviso en vivo al comprador cuando booking emite su tiquete.
   Un anónimo u otro usuario (ADMIN incluido) ⇒ `FORBIDDEN_TOPIC` sin cerrar la conexión. El `data`
   lleva **solo** `bookingId`, `ticketId`, `itineraryId` y `seatNumbers` (nunca `qrCode` ni `userId`);
@@ -90,6 +105,13 @@ ws.send(JSON.stringify({ type: "subscribe", topic: `usuario:${userId}:tiquetes` 
   lleva solo identificadores y datos de la decisión (`bookingId`, `ticketId`, `itineraryId` y sus
   variantes `…Anterior`/`…Nuevo`, `refundId`, `seatNumbers`, `cambio`, `causa`, `plazoDecision`,
   `opciones`); nunca `qrCode`, `email`, documento, nombre ni montos.
+  - `WaitlistSeatOffered` (US-140, de seat-inventory) lleva `itineraryId`, `seatNumbers` y `expiraEn`;
+    el `holdId` no sale (es dato de la retención: la app lo consulta por la lista de espera).
+  - `WaitlistClosed {itineraryId, userIds}` se envía al tópico de **cada** `userId` de la lista, con
+    `data` = solo `{itineraryId}`: ningún pasajero ve los ids de los demás turnos.
+  - `TicketNoShow` (US-153, de booking) lleva `bookingId`, `ticketId` e `itineraryId`.
+  - `OfferAlert` (US-161) lleva solo datos de la oferta: `offerId`, `itineraryId`, `origen`, `destino`,
+    `precioOferta`, `precioBase`, `inicio`, `fin` y `salida` (los que vengan).
 
 ```js
 ws.send(JSON.stringify({ type: "subscribe", topic: `usuario:${userId}:avisos` }));
@@ -121,9 +143,21 @@ ws.send(JSON.stringify({ type: "subscribe", topic: `empresa:${companyId}:alertas
 //             "data":{"alertId":…,"itineraryId":…,"tipo":"SOS","gravedad":"CRITICA","mensaje":…}}
 ```
 
+- **Privado `empresa:{uuid}:flota` (US-178):** el mapa de la flota en vivo. Mismo acceso que las
+  alertas (otra empresa, otro rol o un anónimo ⇒ `FORBIDDEN_TOPIC`) y, como ellas, conserva
+  `conductorId` sin datos de pasajeros. Sin snapshot: al suscribirse la app pide `GET /fleet/live` y
+  luego aplica los eventos (que fleet manda con `companyId`).
+
+```js
+ws.send(JSON.stringify({ type: "subscribe", topic: `empresa:${companyId}:flota` }));
+// servidor → {"type":"subscribed",...}   (sin snapshot: la app llama GET /fleet/live)
+// servidor → {"type":"event","topic":"empresa:…:flota","event":"PositionUpdated",
+//             "data":{"busId":…,"itineraryId":…,"companyId":…,"lat":…,"lng":…}}
+```
+
 **Límite de suscripciones por sesión:** `max-subscriptions` (20) para las autenticadas,
 `max-staff-subscriptions` (20; sin valor, igual a `max-subscriptions`) para `OPERADOR` y `ADMIN`, que
-siguen varios viajes y su canal de alertas, y `max-anonymous-subscriptions` (5) para las anónimas. El
+siguen varios viajes y sus canales de alertas y flota, y `max-anonymous-subscriptions` (5) para las anónimas. El
 `connected` de una sesión autenticada trae su `maxSubscriptions`; superarlo ⇒ `TOO_MANY_SUBSCRIPTIONS`.
 
 Token inválido en `connect` ⇒ `INVALID_TOKEN` y cierre 4401 (en `?token=`, si está permitido, ⇒ 401
@@ -143,6 +177,20 @@ usuario. Estos eventos no se reenvían a ningún tema y no afectan a las sesione
 cuenta). Si existe ⇒ `{"type":"error","code":"ACCOUNT_SUSPENDED"}` y cierre 4401, igual que un token
 revocado. Si Redis no responde se aplica el mismo criterio: se permite la conexión con un WARN. Las
 conexiones ya abiertas las cierra el evento `UserSuspended` (arriba).
+
+**Cambio de contraseña (US-129):** identity guarda `tripbus:pwd-changed:{sub}` = epoch en **segundos**
+del cambio (TTL = vida máxima de un token) y devuelve un token nuevo. Los tokens con `iat` anterior a
+ese valor dejan de valer:
+
+- **Al conectar** (`connect` o `?token=`), después de la suspensión: si la clave existe y el `iat` es
+  menor ⇒ `{"type":"error","code":"UNAUTHENTICATED"}` y cierre 4401, igual que un token revocado. El
+  token emitido en el mismo segundo del cambio (el que entrega identity) sí vale; un token **sin `iat`**
+  con la clave presente se rechaza (como hace identity).
+- **Con la sesión abierta:** en cada heartbeat (20 s) el gateway hace **una** consulta (`GET`) por
+  sesión autenticada y la cierra igual si su token quedó viejo. Las anónimas no consultan nada.
+- Identity no publica un evento `PasswordChanged`, así que no hay cierre inmediato por evento: el
+  máximo para cerrar una sesión abierta es un intervalo de heartbeat.
+- Redis caído o valor ilegible ⇒ mismo criterio que la revocación: se permite, con un WARN en el log.
 
 ### Orden de los eventos (`seq` y `asOfSeq`)
 
@@ -378,15 +426,15 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-10-22) | Mínimo |
+| Métrica | Medido (2026-11-02) | Mínimo |
 |---|---|---|
-| Líneas | 93,6 % | `jacoco.minimo.lineas` = 0.90 |
-| Ramas | 91,3 % | `jacoco.minimo.ramas` = 0.90 |
+| Líneas | 99,0 % | `jacoco.minimo.lineas` = 0.95 |
+| Ramas | 97,5 % | `jacoco.minimo.ramas` = 0.95 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y
 actualiza la propiedad en el pom en el mismo PR. Las mejores candidatas para subirla son
-`RealtimeHandler` (heartbeat, `connect` y límites de suscripción) y `ClientSession`.
+`RealtimeHandler` (suscripción y snapshot) y `EventFanout` (arranque del stream).
 
 Fuera de la cobertura (misma en `sonar.coverage.exclusions` y en los `<excludes>` de JaCoCo) solo
 está `RealtimeGatewayApplication` (el arranque de Spring). `RealtimeProperties` es un record de

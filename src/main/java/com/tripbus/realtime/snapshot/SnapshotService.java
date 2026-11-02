@@ -50,14 +50,17 @@ public class SnapshotService {
                 case POSICION -> fleet.get().uri("/buses/{id}/position", topic.id()).retrieve().body(JsonNode.class);
                 // Posición, estado, paradas, estadoRastreo y ultimaPosicionEn del bus del itinerario.
                 case POSICION_VIAJE -> fleet.get().uri("/itineraries/{id}/bus-position", topic.id()).retrieve().body(JsonNode.class);
+                // Vitrina (US-160): la primera página, con el orden y tamaño por defecto de flash-offers.
+                case OFERTAS_ACTIVAS -> flashOffers.get().uri("/offers/showcase").retrieve().body(JsonNode.class);
                 // Sin snapshot (Kind.hasSnapshot): RealtimeHandler no lo pide.
-                case TIQUETES, AVISOS, VIAJE_CONDUCTOR, ALERTAS -> com.fasterxml.jackson.databind.node.NullNode.getInstance();
+                case TIQUETES, AVISOS, VIAJE_CONDUCTOR, ALERTAS, FLOTA -> com.fasterxml.jackson.databind.node.NullNode.getInstance();
             };
             return Optional.ofNullable(data);
         } catch (HttpClientErrorException.NotFound e) {
             return Optional.of(com.fasterxml.jackson.databind.node.NullNode.getInstance());
         } catch (RuntimeException e) {
-            log.warn("No se pudo obtener el snapshot de {}:{} — {}", topic.kind(), topic.id(), e.getMessage());
+            log.warn("No se pudo obtener el snapshot de {}{} — {}", topic.kind(),
+                    topic.id() == null ? "" : ":" + topic.id(), e.getMessage());
             return Optional.empty();
         }
     }
