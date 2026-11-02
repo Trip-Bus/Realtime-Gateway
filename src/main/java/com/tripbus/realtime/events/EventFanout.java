@@ -14,6 +14,7 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.stream.MapRecord;
@@ -24,6 +25,7 @@ import org.springframework.data.redis.stream.StreamMessageListenerContainer;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -38,8 +40,13 @@ import java.util.Set;
  * reciben datos de una persona: ni el userId, email, documento o nombre de un pasajero, ni los ids de
  * su retención o reserva, ni el conductorId, ni el texto libre de un SOS. El aviso privado
  * de tiquete (US-033) lleva solo bookingId, ticketId, itineraryId y seatNumbers: nunca qrCode ni userId.
- * Los avisos del pasajero (US-183) llevan solo identificadores y datos de la decisión. El canal del
- * conductor y el de alertas de la empresa sí llevan conductorId, pero nunca datos de pasajeros.
+ * Los avisos del pasajero (US-183, US-140, US-153, US-161) llevan solo identificadores y datos de la
+ * decisión u oferta: nunca la retención ni los userIds de otros turnos de la lista de espera. El canal
+ * del conductor y los de la empresa (alertas y flota) sí llevan conductorId, pero nunca datos de pasajeros.
+ *
+ * <p>Frecuencia: la vitrina ({@code ofertas:activas}) recibe como máximo un OfferQuotaUpdated por
+ * segundo por oferta y la flota ({@code empresa:{id}:flota}) una PositionUpdated cada 3 s por viaje; lo
+ * demás se descarta (oferta:{id}:cupo y viaje:{id}:posicion siguen recibiéndolo todo).
  *
  * <p>Orden: los eventos se envían en el orden del stream, también un TripAlertRaised CRITICA (SOS,
  * ACCIDENTE). No hay una cola propia que reordenar: cada envío va directo al buffer del
@@ -52,6 +59,8 @@ public class EventFanout implements SmartLifecycle {
     /** Datos de pasajeros: no salen en ningún tópico salvo el propio aviso del pasajero (y ahí solo ids). */
     private static final Set<String> PERSONAL_FIELDS = Set.of("userId", "holdId", "email", "numeroDocumento", "nombre",
             "qrCode");
+    private static final String ITINERARY_ID = "itineraryId";
+    private static final String OFFER_ID = "offerId";
     /** Lo que se quita de los tópicos públicos, a cualquier profundidad. */
     private static final Set<String> PRIVATE_FIELDS = union(PERSONAL_FIELDS, Set.of("bookingId", "conductorId", "mensaje"));
     /** Las paradas (EtaUpdated, posición) tienen nombre de lugar, no de persona: ahí se conserva "nombre". */
@@ -59,11 +68,19 @@ public class EventFanout implements SmartLifecycle {
     private static final String NAME = "nombre";
     /** Texto libre de una alerta SOS: se quita si el objeto es un SOS (tipo = SOS). */
     private static final String SOS_REASON = "motivo";
-    private static final List<String> TICKET_NOTICE_FIELDS = List.of("bookingId", "ticketId", "itineraryId", "seatNumbers");
+    private static final List<String> TICKET_NOTICE_FIELDS = List.of("bookingId", "ticketId", ITINERARY_ID, "seatNumbers");
     private static final List<String> USER_NOTICE_FIELDS = List.of("bookingId", "bookingIdAnterior", "bookingIdNuevo",
-            "ticketId", "ticketIdAnterior", "ticketIdNuevo", "itineraryId", "itineraryIdAnterior", "itineraryIdNuevo",
-            "refundId", "seatNumbers", "cambio", "causa", "plazoDecision", "opciones");
+            "ticketId", "ticketIdAnterior", "ticketIdNuevo", ITINERARY_ID, "itineraryIdAnterior", "itineraryIdNuevo",
+            "refundId", "seatNumbers", "cambio", "causa", "plazoDecision", "opciones",
+            // Lista de espera (US-140): hasta cuándo se le guardan los asientos ofrecidos.
+            "expiraEn");
+    /** Alerta de oferta (US-161): la oferta que coincide con la ruta que sigue el pasajero. */
+    private static final String OFFER_ALERT = "OfferAlert";
+    private static final List<String> OFFER_ALERT_FIELDS = List.of(OFFER_ID, ITINERARY_ID, "origen", "destino",
+            "precioOferta", "precioBase", "inicio", "fin", "salida");
     private static final Set<String> REVOCATIONS = Set.of("SessionRevoked", "UserSuspended");
+    private static final String QUOTA_UPDATED = "OfferQuotaUpdated";
+    private static final String POSITION_UPDATED = "PositionUpdated";
 
     private final RedisConnectionFactory connectionFactory;
     private final StringRedisTemplate redis;
@@ -71,12 +88,22 @@ public class EventFanout implements SmartLifecycle {
     private final ObjectMapper objectMapper;
     private final RealtimeProperties properties;
     private final Counter delivered;
+    private final Clock clock;
+    private final Throttle showcaseQuota = new Throttle(Duration.ofSeconds(1));
+    private final Throttle fleetPositions = new Throttle(Duration.ofSeconds(3));
     private StreamMessageListenerContainer<String, MapRecord<String, String, String>> container;
     private volatile boolean running;
     private volatile String lastSeq = "0-0";
 
+    @Autowired
     public EventFanout(RedisConnectionFactory connectionFactory, StringRedisTemplate redis, SessionRegistry registry,
                        ObjectMapper objectMapper, RealtimeProperties properties, MeterRegistry meterRegistry) {
+        this(connectionFactory, redis, registry, objectMapper, properties, meterRegistry, Clock.systemUTC());
+    }
+
+    EventFanout(RedisConnectionFactory connectionFactory, StringRedisTemplate redis, SessionRegistry registry,
+                ObjectMapper objectMapper, RealtimeProperties properties, MeterRegistry meterRegistry, Clock clock) {
+        this.clock = clock;
         this.connectionFactory = connectionFactory;
         this.redis = redis;
         this.registry = registry;
@@ -151,14 +178,14 @@ public class EventFanout implements SmartLifecycle {
             }
             List<String> topics = Topics.forEvent(type, payload);
             if (topics.isEmpty() && Topics.isUserNotice(type)) {
-                // Booking debe mandar el userId del dueño: sin él no hay a quién avisar.
+                // El servicio dueño debe mandar el userId (o los userIds): sin él no hay a quién avisar.
                 log.warn("Evento {} {} sin userId: no se difunde", type, fields.get("eventId"));
             }
             for (String topic : topics) {
                 Set<ClientSession> subscribers = registry.subscribers(topic);
                 // Un id que no es uuid (p. ej. userId mal formado) da un tópico que nadie puede seguir.
                 Topics.Parsed parsed = Topics.parse(topic);
-                if (subscribers.isEmpty() || parsed == null) {
+                if (subscribers.isEmpty() || parsed == null || throttled(parsed.kind(), type, topic, payload)) {
                     continue;
                 }
                 ObjectNode out = objectMapper.createObjectNode();
@@ -168,7 +195,7 @@ public class EventFanout implements SmartLifecycle {
                 out.put("seq", record.getId().getValue());
                 out.put("eventId", fields.get("eventId"));
                 out.put("occurredAt", fields.get("occurredAt"));
-                out.set("data", data(parsed.kind(), payload));
+                out.set("data", data(parsed.kind(), type, payload));
                 String json = out.toString();
                 for (ClientSession session : subscribers) {
                     deliver(session, json);
@@ -177,6 +204,20 @@ public class EventFanout implements SmartLifecycle {
         } catch (Exception e) {
             log.warn("Evento {} no difundido: {}", type, e.getMessage());
         }
+    }
+
+    /**
+     * true si el evento se descarta en este tópico por el límite de frecuencia: OfferQuotaUpdated en la
+     * vitrina (uno por segundo por oferta) y PositionUpdated en la flota (uno cada 3 s por viaje).
+     */
+    private boolean throttled(Topics.Kind kind, String type, String topic, JsonNode payload) {
+        if (kind == Topics.Kind.OFERTAS_ACTIVAS && QUOTA_UPDATED.equals(type)) {
+            return !showcaseQuota.allow(topic + "|" + payload.path(OFFER_ID).asText(), clock.instant());
+        }
+        if (kind == Topics.Kind.FLOTA && POSITION_UPDATED.equals(type)) {
+            return !fleetPositions.allow(topic + "|" + payload.path(ITINERARY_ID).asText(), clock.instant());
+        }
+        return false;
     }
 
     /**
@@ -220,12 +261,13 @@ public class EventFanout implements SmartLifecycle {
      * Lo que ve el cliente según el tópico: los avisos al pasajero se arman campo a campo; el canal del
      * conductor y el de la empresa, sin datos de pasajeros; los públicos, sin ningún campo privado.
      */
-    static JsonNode data(Topics.Kind kind, JsonNode payload) {
+    static JsonNode data(Topics.Kind kind, String type, JsonNode payload) {
         return switch (kind) {
             case TIQUETES -> pick(payload, TICKET_NOTICE_FIELDS);
-            case AVISOS -> strip(pick(payload, USER_NOTICE_FIELDS), PERSONAL_FIELDS, false);
+            case AVISOS -> strip(pick(payload, OFFER_ALERT.equals(type) ? OFFER_ALERT_FIELDS : USER_NOTICE_FIELDS),
+                    PERSONAL_FIELDS, false);
             // El operador sí ve el motivo de un SOS.
-            case VIAJE_CONDUCTOR, ALERTAS -> strip(payload.deepCopy(), PERSONAL_FIELDS, false);
+            case VIAJE_CONDUCTOR, ALERTAS, FLOTA -> strip(payload.deepCopy(), PERSONAL_FIELDS, false);
             default -> sanitize(payload);
         };
     }

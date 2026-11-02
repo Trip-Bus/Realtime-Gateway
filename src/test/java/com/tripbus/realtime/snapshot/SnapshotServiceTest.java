@@ -86,6 +86,23 @@ class SnapshotServiceTest {
     }
 
     @Test
+    void laVitrinaPideLaPrimeraPaginaDelShowcaseConElManejoDeErroresDeLosDemas() {
+        assertThat(snapshot("ofertas:activas")).get().satisfies(data -> assertThat(data.isNull()).isTrue());
+
+        status.put("/offers/showcase", 200);
+        assertThat(snapshot("ofertas:activas").orElseThrow().path("path").asText()).isEqualTo("/offers/showcase");
+
+        status.put("/offers/showcase", 503);
+        assertThat(snapshot("ofertas:activas")).isEmpty();
+    }
+
+    @Test
+    void laFlotaNoTieneSnapshot() {
+        UUID id = UUID.randomUUID();
+        assertThat(snapshot("empresa:" + id + ":flota")).get().satisfies(data -> assertThat(data.isNull()).isTrue());
+    }
+
+    @Test
     void servicioCaidoDevuelveVacio() {
         UUID id = UUID.randomUUID();
         server.stop(0);
