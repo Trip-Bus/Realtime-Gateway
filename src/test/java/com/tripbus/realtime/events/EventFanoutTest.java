@@ -2,9 +2,13 @@ package com.tripbus.realtime.events;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tripbus.realtime.config.RealtimeProperties;
+import com.tripbus.realtime.config.TraceContexts;
 import com.tripbus.realtime.ws.ClientSession;
 import com.tripbus.realtime.ws.SessionRegistry;
 import com.tripbus.realtime.ws.Topics;
+import com.tripbus.realtime.ws.WsMetrics;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,15 +50,14 @@ class EventFanoutTest {
     private SimpleMeterRegistry meters;
     private SessionRegistry registry;
     private EventFanout fanout;
+    private ReplayBuffer replay;
 
     @BeforeEach
     void setUp() {
         meters = new SimpleMeterRegistry();
         registry = new SessionRegistry(meters);
-        RealtimeProperties properties = new RealtimeProperties(null, null, null, null, null, null, 0, 0, 0,
-                null, null, null, null, false);
-        fanout = new EventFanout(mock(RedisConnectionFactory.class), mock(StringRedisTemplate.class), registry,
-                new ObjectMapper(), properties, meters);
+        replay = mock(ReplayBuffer.class);
+        fanout = newFanout();
     }
 
     private static WebSocketSession raw(String id) {
@@ -386,10 +389,21 @@ class EventFanoutTest {
     private EventFanout fanoutAt(Instant first, Instant... rest) {
         Clock clock = mock(Clock.class);
         when(clock.instant()).thenReturn(first, rest);
+        EventFanout limitado = newFanout();
+        limitado.useClock(clock);
+        return limitado;
+    }
+
+    private EventFanout newFanout() {
+        return newFanout(new DefaultListableBeanFactory().getBeanProvider(DomainEventListener.class));
+    }
+
+    private EventFanout newFanout(ObjectProvider<DomainEventListener> listeners) {
         RealtimeProperties properties = new RealtimeProperties(null, null, null, null, null, null, 0, 0, 0,
                 null, null, null, null, false);
         return new EventFanout(mock(RedisConnectionFactory.class), mock(StringRedisTemplate.class), registry,
-                new ObjectMapper(), properties, meters, clock);
+                new ObjectMapper(), properties, meters, replay, new WsMetrics(meters, registry),
+                TraceContexts.noop(), listeners);
     }
 
     private WebSocketSession subscribed(String id, String topicName) {
@@ -499,5 +513,61 @@ class EventFanoutTest {
 
         assertThat(sent(primero, 1).get(0)).contains("usuario:" + uno + ":avisos").doesNotContain(dos.toString());
         assertThat(sent(segundo, 1).get(0)).contains("usuario:" + dos + ":avisos").doesNotContain(uno.toString());
+    }
+
+    @Test
+    void cadaMensajeSeGuardaEnElBuferDeReconexionAunqueNadieLoSigaEnEstaReplica() {
+        fanout.onEvent(record("800-0", "SeatHeld", "{\"itineraryId\":\"" + itinerary + "\",\"userId\":\"x\"}"));
+
+        verify(replay).append(argThat(topic::equals), argThat("800-0"::equals),
+                argThat(json -> json.contains("\"seq\":\"800-0\"") && !json.contains("userId")));
+    }
+
+    @Test
+    void losListenersRecibenCadaEventoYUnoQueFallaNoAfectaALosDemas() {
+        DefaultListableBeanFactory beans = new DefaultListableBeanFactory();
+        List<String> recibidos = new java.util.ArrayList<>();
+        beans.registerSingleton("falla", (DomainEventListener) (type, seq, eventId, payload) -> {
+            throw new IllegalStateException("roto");
+        });
+        beans.registerSingleton("anota", (DomainEventListener) (type, seq, eventId, payload) ->
+                recibidos.add(type + "@" + seq + ":" + payload.path("userId").asText()));
+        EventFanout conListeners = newFanout(beans.getBeanProvider(DomainEventListener.class));
+
+        conListeners.onEvent(record("900-0", "BookingAffected", "{\"userId\":\"u-1\"}"));
+        // Un evento sin tópicos (tipo desconocido) también llega a los listeners.
+        conListeners.onEvent(record("900-1", "AlgoNuevo", "{}"));
+
+        assertThat(recibidos).containsExactly("BookingAffected@900-0:u-1", "AlgoNuevo@900-1:");
+        assertThat(conListeners.lastSeq()).isEqualTo("900-1");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void arrancaDesdeElUltimoIdDelStreamOCeroSiNoSePuedeLeer() {
+        StringRedisTemplate redis = mock(StringRedisTemplate.class);
+        org.springframework.data.redis.core.StreamOperations<String, Object, Object> streams =
+                mock(org.springframework.data.redis.core.StreamOperations.class);
+        when(redis.opsForStream()).thenReturn(streams);
+        MapRecord<String, Object, Object> last = StreamRecords.newRecord().in("tripbus:events").withId("1234-5")
+                .ofMap(Map.<Object, Object>of("type", "SeatHeld"));
+        when(streams.reverseRange(anyString(), any(), any())).thenReturn(List.of(last))
+                .thenThrow(new IllegalStateException("redis caído"));
+        RealtimeProperties properties = new RealtimeProperties(null, null, null, null, null, null, 0, 0, 0,
+                null, null, null, null, false);
+        EventFanout lector = new EventFanout(mock(RedisConnectionFactory.class), redis, registry, new ObjectMapper(),
+                properties, meters, replay, new WsMetrics(meters, registry), TraceContexts.noop(),
+                new DefaultListableBeanFactory().getBeanProvider(DomainEventListener.class));
+
+        lector.stop();
+        assertThat(lector.isRunning()).isFalse();
+        lector.start();
+        assertThat(lector.lastSeq()).isEqualTo("1234-5");
+        assertThat(lector.isRunning()).isTrue();
+        lector.stop();
+        lector.start();
+        assertThat(lector.lastSeq()).isEqualTo("0-0");
+        lector.stop();
+        assertThat(lector.isRunning()).isFalse();
     }
 }

@@ -7,7 +7,7 @@ envía el snapshot inicial y difunde los eventos. **No tiene lógica de negocio 
 
 **Stack:** Java 21 · Spring Boot 3.5.16 · Redis 7
 
-**HU:** US-020, US-021, US-033 (aviso de tiquete), US-039 (seguimiento público), US-047 (parte), US-056 (parte), US-183 (avisos del pasajero), US-186 (canal del conductor) · **Puerto:** 18007 · **BD:** ninguna (solo Redis)
+**HU:** US-020, US-021, US-033 (aviso de tiquete), US-039 (seguimiento público), US-047 (parte), US-056 (parte), US-183 (avisos del pasajero), US-186 (canal del conductor), US-184 (reconexión), US-185 (Web Push), US-163 (personas mirando), US-162 (eventos de la sala de espera), HT-10 (observabilidad), HT-11 (límites y métricas) · **Puerto:** 18007 · **BD:** ninguna (solo Redis)
 
 ## Protocolo
 
@@ -48,21 +48,25 @@ ruta). Detrás del gateway, la autenticación depende solo del JWT y el `Origin`
 | Cliente → servidor | Servidor → cliente |
 |---|---|
 | `{"type":"subscribe","topic":"itinerario:{id}:asientos"}` | `subscribed`, luego `snapshot` con el estado actual |
+| `{"type":"resume","topic":"...","lastSeq":"<ms>-<n>"}` (al reconectar, US-184) | `subscribed`, los `event` perdidos y `resumed`; o `subscribed` y `snapshot` si ya no están (ver [Reconexión](#reconexión-resume)) |
 | `{"type":"unsubscribe","topic":"..."}` | `event` con `{topic, event, seq, eventId, data}` (`snapshot` lleva `asOfSeq`) |
 | `{"type":"ping"}` / `{"type":"pong"}` | `ping` cada 20 s (sin respuesta en 45 s ⇒ se cierra con 4408) |
+
+`subscribe` y `resume` aceptan además `"traceparent":"00-…"` (W3C, opcional): el snapshot que piden continúa
+esa traza (ver [Observabilidad](#observabilidad)).
 
 #### Tópicos
 
 | Tópico | Acceso | Eventos | Snapshot |
 |---|---|---|---|
 | `itinerario:{id}:asientos` | Público | `SeatHeld`, `SeatReleased`, `SeatSold`, `HoldExpired`, `SeatStateChanged` | Mapa de asientos (seat-inventory) |
-| `oferta:{id}:cupo` | Público | `OfferQuotaUpdated` (todos), `OfferClosed`, `OfferSoldOut`, `OfferActivated` | Cupo (flash-offers) |
+| `oferta:{id}:cupo` | Público | `OfferQuotaUpdated` (todos), `OfferClosed`, `OfferSoldOut`, `OfferActivated`, `OfferQueueUpdated {offerId, enFila, admitidos}` (sala de espera, US-162), `OfferViewers {offerId, personas}` (US-163, lo genera el gateway; sin `seq`) | Cupo (flash-offers) |
 | `ofertas:activas` | Público (único tópico **sin id**) | `OfferCreated`, `OfferActivated`, `OfferUpdated`, `OfferClosed`, `OfferSoldOut` (con `origen` y `destino`), `OfferQuotaUpdated` **como máximo uno por segundo por oferta** (US-160) | `GET {flash-offers}/offers/showcase`: primera página de la vitrina |
 | `viaje:{id}:eventos` | Público | `TripEventReported` (incluye `AVERIA`, `ACCIDENTE`, `VIA_CERRADA`; nunca `SOS`), `ItineraryRescheduled` | Línea de tiempo (fleet) |
 | `viaje:{id}:posicion` | Público | `PositionUpdated` (con `itineraryId`), `TrackingStatusChanged` (`ACTIVO`, `EN_PAUSA`, `SIN_SENAL`, `FINALIZADO`), `EtaUpdated` | `GET {fleet}/itineraries/{id}/bus-position`: posición, estado, paradas, `estadoRastreo` y `ultimaPosicionEn` (US-173/US-174) |
 | `bus:{id}:posicion` | Público — **deprecado** | `PositionUpdated` | Última posición (fleet) |
 | `usuario:{uuid}:tiquetes` | **Privado**: solo la sesión autenticada cuyo `userId` es `{uuid}` | `TicketIssued` (US-033) | Ninguno: solo `subscribed` |
-| `usuario:{uuid}:avisos` | **Privado**: solo la sesión cuyo `userId` es `{uuid}` (ni ADMIN) | `BookingAffected`, `BookingRelocated`, `RefundProcessed`, `TicketRescheduled`, `TicketUpdated`, `TicketIssued` (US-183), `WaitlistSeatOffered` y `WaitlistClosed` (US-140), `TicketNoShow` (US-153), `OfferAlert` (US-161) | Ninguno: la app pide `GET /bookings/affected` |
+| `usuario:{uuid}:avisos` | **Privado**: solo la sesión cuyo `userId` es `{uuid}` (ni ADMIN) | `BookingAffected`, `BookingRelocated`, `RefundProcessed`, `TicketRescheduled`, `TicketUpdated`, `TicketIssued` (US-183), `WaitlistSeatOffered` y `WaitlistClosed` (US-140), `TicketNoShow` (US-153), `OfferAlert` (US-161), `OfferQueueAdmitted` (sala de espera, US-162) | Ninguno: la app pide `GET /bookings/affected` |
 | `conductor:{uuid}:viaje` | **Privado**: solo la sesión cuyo `userId` es `{uuid}` y con rol `CONDUCTOR` | `DriverAssigned`, `DriverUnassigned`, `DriverAssignmentConflict` (US-186) | Ninguno: solo `subscribed` |
 | `empresa:{uuid}:alertas` | **Privado**: `OPERADOR` cuyo claim `companyId` es `{uuid}`, o `ADMIN` (cualquier empresa) | `TripAlertRaised`, `TripAlertResolved`, `TripInterrupted`, `DriverAssignmentConflict`, `TrackingStatusChanged` solo con estado `SIN_SENAL` | Ninguno: la app pide `GET /alerts?estado=ABIERTA` |
 | `empresa:{uuid}:flota` | **Privado**: igual que `empresa:{uuid}:alertas` | `PositionUpdated` **como máximo una cada 3 s por viaje**, `EtaUpdated`, `TrackingStatusChanged` (todos los estados), por `companyId` (US-178) | Ninguno: la app pide `GET /fleet/live` |
@@ -112,6 +116,8 @@ ws.send(JSON.stringify({ type: "subscribe", topic: `usuario:${userId}:tiquetes` 
   - `TicketNoShow` (US-153, de booking) lleva `bookingId`, `ticketId` e `itineraryId`.
   - `OfferAlert` (US-161) lleva solo datos de la oferta: `offerId`, `itineraryId`, `origen`, `destino`,
     `precioOferta`, `precioBase`, `inicio`, `fin` y `salida` (los que vengan).
+  - `OfferQueueAdmitted {userId, …}` (sala de espera, US-162, de flash-offers): al pasajero admitido a
+    comprar. Lleva solo `offerId`, `itineraryId`, `turno`, `admitidoEn` y `expiraEn` (los que vengan).
 
 ```js
 ws.send(JSON.stringify({ type: "subscribe", topic: `usuario:${userId}:avisos` }));
@@ -155,10 +161,36 @@ ws.send(JSON.stringify({ type: "subscribe", topic: `empresa:${companyId}:flota` 
 //             "data":{"busId":…,"itineraryId":…,"companyId":…,"lat":…,"lng":…}}
 ```
 
-**Límite de suscripciones por sesión:** `max-subscriptions` (20) para las autenticadas,
-`max-staff-subscriptions` (20; sin valor, igual a `max-subscriptions`) para `OPERADOR` y `ADMIN`, que
-siguen varios viajes y sus canales de alertas y flota, y `max-anonymous-subscriptions` (5) para las anónimas. El
-`connected` de una sesión autenticada trae su `maxSubscriptions`; superarlo ⇒ `TOO_MANY_SUBSCRIPTIONS`.
+- **Personas mirando una oferta (US-163):** el gateway cuenta las sesiones suscritas a `oferta:{id}:cupo`
+  en **todas** las réplicas (hash `tripbus:ws:viewers:{offerId}` en Redis: un campo por réplica que vence a
+  los 15 s si la réplica deja de renovarlo) y cada 5 s (`tripbus.realtime.viewers-interval-ms`), **si el
+  total cambió**, envía al mismo tópico `{"type":"event","event":"OfferViewers","data":{"offerId":…,"personas":3}}`.
+  Solo es un número: nunca dice quién mira. No viene del stream, así que no lleva `seq` (no se compara con
+  `asOfSeq`) ni entra al búfer de reconexión.
+- **Sala de espera (US-162):** `OfferQueueUpdated {offerId, enFila, admitidos}` va a `oferta:{offerId}:cupo`
+  (no a la vitrina) y `OfferQueueAdmitted {userId, …}` a `usuario:{userId}:avisos` (también por Web Push).
+
+### Límites
+
+| Límite | Valor | Dónde se cuenta | Al pasarse |
+|---|---|---|---|
+| Suscripciones de una sesión autenticada | `max-subscriptions` = 20 | en la sesión | `TOO_MANY_SUBSCRIPTIONS`, sin cerrar |
+| Suscripciones de `OPERADOR` y `ADMIN` | `max-staff-subscriptions` = 20 (sin valor: `max-subscriptions`) | en la sesión | `TOO_MANY_SUBSCRIPTIONS`, sin cerrar |
+| Suscripciones de una sesión anónima | `max-anonymous-subscriptions` = 5 | en la sesión | `TOO_MANY_SUBSCRIPTIONS`, sin cerrar |
+| Conexiones abiertas por IP (HT-11) | `max-connections-per-ip` = 20 (`WS_MAX_CONNECTIONS_PER_IP`) | Redis, entre réplicas | `TOO_MANY_CONNECTIONS` y cierre **4429** al abrir |
+| Conexiones autenticadas por usuario (HT-11) | `max-connections-per-user` = 5 (`WS_MAX_CONNECTIONS_PER_USER`) | Redis, entre réplicas | `TOO_MANY_CONNECTIONS` y cierre **4429** al autenticar |
+| Mensajes del cliente (HT-11) | 30 por 10 s por sesión (`max-client-messages`, `client-message-window`) | en la sesión | `RATE_LIMITED` y el mensaje se descarta, **sin cerrar** |
+
+El `connected` de una sesión autenticada trae su `maxSubscriptions`.
+
+- Las conexiones se cuentan en sorted sets de Redis (`tripbus:ws:conn:ip:{ip}` y
+  `tripbus:ws:conn:user:{userId}`): un miembro por conexión que el heartbeat renueva cada 20 s y que vence a
+  los 60 s (`presence-ttl`) si la réplica muere. Al cerrarse la conexión se descuenta en el acto. Las
+  anónimas cuentan solo por IP. Si Redis no responde se deja conectar (con WARN), como con la revocación.
+- **IP del cliente:** por defecto la de la conexión TCP. Detrás del API Gateway todas llegarían con la IP
+  del gateway, así que ahí se configura `WS_CLIENT_IP_HEADER=X-Forwarded-For` (o `X-Real-IP`): se toma el
+  **último** valor del header (el que agregó el proxy de confianza; lo anterior lo pudo escribir el cliente)
+  y solo si es una IP. Es solo para contar: la autenticación sigue sin usar ningún header `X-Forwarded-*`.
 
 Token inválido en `connect` ⇒ `INVALID_TOKEN` y cierre 4401 (en `?token=`, si está permitido, ⇒ 401
 en el handshake); token vencido ⇒ cierre 4401 (el cliente reconecta con uno nuevo), también con
@@ -214,6 +246,79 @@ const after = (a, b) => { const [am, an] = a.split("-").map(Number), [bm, bn] = 
 // snapshot → estado = data; ultimo = asOfSeq
 // event    → if (!after(seq, ultimo)) return; aplicar(data); ultimo = seq;
 ```
+
+### Reconexión (`resume`)
+
+US-184: al reconectar, en vez de `subscribe` el cliente manda `resume` con el `seq` del último evento que
+aplicó de ese tópico, y recupera lo que se perdió sin pedir el snapshot completo:
+
+```js
+ws.send(JSON.stringify({ type: "resume", topic: `usuario:${userId}:avisos`, lastSeq: ultimo }));
+// servidor → {"type":"subscribed","topic":…}
+// servidor → {"type":"event",…,"seq":"1760280000000-4"}     (los perdidos, en orden)
+// servidor → {"type":"event",…,"seq":"1760280000000-7"}
+// servidor → {"type":"resumed","topic":…,"lastSeq":"1760280000000-7"}
+```
+
+- Exige **la misma autorización que `subscribe`** (temas privados, anónimos, máximo de suscripciones): si no
+  pasa, el mismo error (`FORBIDDEN_TOPIC`, `UNAUTHENTICATED`…) y no queda suscrito. Un `lastSeq` que no tiene
+  la forma `<ms>-<n>` ⇒ `INVALID_SEQ`.
+- El gateway guarda en Redis los últimos **200** eventos de **cada tópico** (`tripbus.realtime.replay.size`)
+  durante **10 minutos** (`tripbus.realtime.replay.ttl`), tal como se enviaron (ya sin datos privados), en
+  un stream por tópico (`tripbus:replay:{topic}`, con el mismo id del bus). Lo comparten todas las réplicas:
+  se puede reconectar a cualquiera.
+- **Si siguen en el búfer** todos los eventos posteriores a `lastSeq`, se reenvían en orden y la respuesta
+  termina con `resumed` (`lastSeq` = el último enviado). Los que llegan en vivo mientras tanto se retienen y
+  salen después de los del búfer, sin repetirse ni desordenarse.
+- **Si ya no están** (pasaron más de 10 minutos, más de 200 eventos o el tópico no tiene búfer) se manda el
+  `snapshot` con `asOfSeq`, exactamente como un `subscribe`, y no llega `resumed`. En los tópicos sin
+  snapshot (avisos, conductor, alertas, flota) ese `snapshot` trae `"data": null`: la app vuelve a pedir su
+  `GET` (p. ej. `/bookings/affected`).
+
+### Notificaciones push (Web Push)
+
+US-185: avisos con la app cerrada. El navegador se suscribe con la llave VAPID pública y registra su
+suscripción en el gateway (a través del API Gateway, con el mismo JWT):
+
+| Método y ruta | Autenticación | Cuerpo | Respuesta |
+|---|---|---|---|
+| `GET /push/public-key` | ninguna | — | `200 {"publicKey":"…"}` (base64url) |
+| `POST /push/subscriptions` | `Authorization: Bearer <JWT>` | `{endpoint, keys:{p256dh, auth}}` (`PushSubscription.toJSON()`) | `201`; `400 INVALID_SUBSCRIPTION`; `401 UNAUTHENTICATED` |
+| `DELETE /push/subscriptions` | `Authorization: Bearer <JWT>` | `{endpoint}` (sin cuerpo: todas las del usuario) | `204`; `401` |
+
+```js
+const { publicKey } = await (await fetch("/push/public-key")).json();
+const sub = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey });
+await fetch("/push/subscriptions", { method: "POST", body: JSON.stringify(sub),
+  headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` } });
+```
+
+- El token se rechaza (401) igual que en el WebSocket: revocado, cuenta suspendida o anterior a un cambio de
+  contraseña. El endpoint debe ser `https` y las llaves válidas (p256dh de 65 bytes, auth de 16).
+- Se guardan en Redis **hasta 5 suscripciones por usuario** (`tripbus:push:subs:{userId}`); al registrar la
+  sexta se borra la más vieja. Un `OPERADOR` queda además en `tripbus:push:operadores:{companyId}`.
+- Se envía push **solo si el destinatario no tiene ninguna conexión abierta en ninguna réplica** (los mismos
+  contadores de Redis de los [límites](#límites)); con la app abierta le llega el `event` por el WebSocket.
+  La primera réplica que reclama `tripbus:push:enviado:{eventId}:{userId}` es la única que envía.
+
+| Evento | Destinatario | Título |
+|---|---|---|
+| `BookingAffected` | pasajero (`userId`) | Tu viaje tuvo un cambio |
+| `BookingRelocated` | pasajero | Te reubicamos en otro viaje |
+| `WaitlistSeatOffered` | pasajero | ¡Hay un puesto para ti! |
+| `OfferAlert` | pasajero | Nueva oferta en tu ruta |
+| `OfferQueueAdmitted` | pasajero | ¡Es tu turno! |
+| `DriverAssigned` | conductor (`conductorId`) | Tienes un viaje asignado |
+| `DriverAssignmentConflict` | conductor | Hay un conflicto en tu agenda |
+| `TripAlertRaised` con `gravedad: CRITICA` | operadores de la empresa (`companyId`) | Alerta crítica en un viaje |
+
+- El contenido es `{"title","body","tipo"}`: un título y un texto corto en español con tuteo, **sin datos
+  personales** (ni nombres, ni ids, ni montos); la app abre el detalle al tocarlo. Va cifrado (`aes128gcm`)
+  y firmado con VAPID (librería `nl.martijndwars:web-push`, MIT), con TTL de 1 h y urgencia alta.
+- Una suscripción que responde **404 o 410** ya no existe y se borra.
+- **Sin `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` y `VAPID_SUBJECT`** (o con llaves inválidas) el push queda
+  apagado: `GET /push/public-key` y `POST` responden `503 PUSH_DISABLED`, no se envía nada y todo lo demás
+  funciona igual. Las llaves se generan una vez, p. ej. con `npx web-push generate-vapid-keys`.
 
 ### Seguimiento público
 
@@ -357,27 +462,51 @@ no arranca y dice cuáles faltan (`RequiredSecretsCheck`).
 
 Opcionales con valor por defecto: `SERVER_PORT` (18007), `REDIS_HOST` (localhost), `REDIS_PORT` (18100),
 `EVENTS_STREAM` (`tripbus:events`), `WS_ALLOW_QUERY_TOKEN` (IDE y QA `true`, PROD `false`; ver
-[Conectarse y autenticarse](#conectarse-y-autenticarse-en-ws)). Este servicio no usa `DB_*` (no tiene base de datos; `DB_HOST`
+[Conectarse y autenticarse](#conectarse-y-autenticarse-en-ws)), `WS_MAX_CONNECTIONS_PER_IP` (20),
+`WS_MAX_CONNECTIONS_PER_USER` (5), `WS_CLIENT_IP_HEADER` (vacía; ver [Límites](#límites)),
+`OTEL_EXPORTER_OTLP_ENDPOINT` (vacía = sin exportar trazas), `TRACING_SAMPLING` (0.1), `LOG_FORMAT`
+(`text`; PROD `json`) y `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (vacías = push apagado). Este servicio no usa `DB_*` (no tiene base de datos; `DB_HOST`
 reemplaza a la antigua `DB_URL` solo en los servicios que la tienen) ni `INTERNAL_API_TOKEN`.
 
 ## Swagger
 
-Este servicio **no tiene Swagger/OpenAPI** en ningún entorno: no expone una API REST de negocio, solo
-el WebSocket `/ws` (protocolo descrito arriba) y `/demo-config.json`. La autenticación es el JWT del
+Este servicio **no tiene Swagger/OpenAPI** en ningún entorno (por eso no usa `OPENAPI_SERVER_URL`): no
+expone una API REST de negocio, solo el WebSocket `/ws`, los tres endpoints de
+[Web Push](#notificaciones-push-web-push) y `/demo-config.json`, todos descritos en este README. La autenticación es el JWT del
 mensaje `connect` (o de `?token=` en el handshake, `HandshakeAuthInterceptor`, solo si está permitido), no Spring Security. La documentación de las APIs REST de
 TripBus está en el Swagger de cada servicio (ver el README de **API-gateway**).
 
 ## Observabilidad
 
-- `/actuator/health` (con `liveness` y `readiness`), `/actuator/prometheus` (conexiones y tópicos
-  activos, mensajes entregados).
+- `/actuator/health` (con `liveness` y `readiness`), `/actuator/prometheus`. Métricas de las conexiones
+  (HT-11, de cada réplica; Prometheus las suma):
+
+  | Métrica | Tipo | Etiquetas |
+  |---|---|---|
+  | `tripbus_ws_conexiones` | gauge | `autenticada` (`true`/`false`) |
+  | `tripbus_ws_suscripciones` | gauge | `tipo_topico` (`asientos`, `cupo`, `avisos`, `alertas`, `flota`, `ofertas_activas`…) |
+  | `tripbus_ws_mensajes_enviados_total` | counter | `tipo_topico` |
+  | `tripbus_ws_cierres_total` | counter | `codigo` (1000, 4401, 4408, 4429…) |
+  | `tripbus_ws_replay_total` | counter | `resultado` (`completo`, `snapshot`, `rechazado`) |
+
+  Se mantienen las anteriores (`tripbus_realtime_connections`, `tripbus_realtime_topics`,
+  `tripbus_realtime_messages_delivered_total`).
+- **Trazas (HT-10):** Micrometer Tracing con OpenTelemetry (`micrometer-tracing-bridge-otel`) y exportador
+  OTLP (`opentelemetry-exporter-otlp`), versiones de Spring Boot. Se exportan por OTLP/HTTP a
+  `${OTEL_EXPORTER_OTLP_ENDPOINT}/v1/traces` (vacía = no se exporta nada, `ObservabilityEnvironment`) con
+  muestreo `${TRACING_SAMPLING:0.1}`. La difusión de un evento **continúa el `traceparent`** que traiga la
+  entrada del stream, y el snapshot pedido por el WebSocket continúa el `traceparent` del mensaje del cliente
+  (o empieza una traza nueva) y lo **propaga** al servicio dueño del dato (`RestClient` con observaciones).
+- **Logs:** con `LOG_FORMAT=json` (por defecto en PROD) cada línea es JSON **ECS**
+  (`logging.structured.format.console=ecs`, `service.name=realtime-gateway`) con el MDC (`requestId`,
+  `traceId`, `spanId`); si no, texto con `[requestId] [traceId]`. Nunca se escriben tokens, la query string
+  ni el endpoint completo de una suscripción push.
 - `/actuator/info`: versión y fecha del build, y `app.commit` (el commit con el que se construyó la imagen).
 - Cada petición HTTP (incluido el handshake de `/ws`) lleva un `requestId`: se reutiliza el header
   `X-Request-Id` o se genera uno, y se devuelve en la respuesta. Las llamadas salientes de snapshot
   (seat-inventory, flash-offers, fleet) lo **propagan** cuando hay uno en curso; los snapshots que se
   piden desde un mensaje del WebSocket corren fuera de una petición HTTP, así que el servicio destino
-  genera el suyo. Logs legibles con `[requestId]` en IDE/QA y JSON (con `requestId` y
-  `"service":"realtime-gateway"`) en PROD.
+  genera el suyo (pero sí recibe el `traceparent`).
 
 ## Pruebas
 
@@ -387,7 +516,9 @@ mvn -B verify      # unitarias + integración con Redis real (Testcontainers: Do
 
 - `*Test` / `*Tests`: unitarias (`TopicsTest`, `RequiredSecretsCheckTest`, `RequestIdFilterTest`,
   `RequestIdPropagationInterceptorTest`, `ClientSessionTest`, `EventFanoutTest`,
-  `HandshakeAuthInterceptorTest`, `TokenRevocationsTest`, `PerfilesConfigTest`, `SnapshotServiceTest`).
+  `HandshakeAuthInterceptorTest`, `TokenRevocationsTest`, `PerfilesConfigTest`, `SnapshotServiceTest`,
+  `SeqTest`, `SessionRegistryTest`, `RealtimeHandlerLimitesTest`, `ObservabilityEnvironmentTest`,
+  `TraceContextsTest`, `RealtimeLimitsTest`, `PushMessagesTest`, `PushNotifierTest`, `PushControllerTest`).
 - `RealtimeIT`: levanta Redis 7 con Testcontainers y prueba de extremo a extremo la conexión
   autenticada con `?token=` (`allow-query-token=true`), el snapshot inicial, la difusión desde Redis
   Streams (sin exponer `userId`), el ping y el rechazo de tokens y tópicos inválidos.
@@ -409,6 +540,21 @@ mvn -B verify      # unitarias + integración con Redis real (Testcontainers: Do
   `PositionUpdated` (sin `conductorId`) y `TrackingStatusChanged`; `PositionUpdated` sigue llegando a
   `bus:{id}:posicion`; con `tripbus:suspended:{sub}` la conexión se rechaza con `ACCOUNT_SUSPENDED` y
   4401 tanto por `connect` como por `?token=`.
+- `RealtimeReconexionIT`: `resume` (US-184) con los eventos en el búfer (los reenvía en orden y termina con
+  `resumed`), fuera de él (búfer de 3: manda el `snapshot` con `asOfSeq`) y sin permiso (`FORBIDDEN_TOPIC`,
+  `UNAUTHENTICATED`, `INVALID_SEQ`, sin quedar suscrito).
+- `RealtimeLimitesIT`: límite de conexiones por IP (con `client-ip-header`) y por usuario (cierre 4429), 30
+  mensajes por 10 s (`RATE_LIMITED` sin cerrar) y las métricas `tripbus_ws_*` en `/actuator/prometheus`.
+- `RealtimeTrazasIT`: el snapshot propaga el `traceparent` del cliente (o uno nuevo) a un fleet simulado y la
+  difusión de un evento deja en los logs el `traceId` de su `traceparent`.
+- `RealtimePushIT`: registro de suscripciones (401, 400, máximo 5), push a un servicio de push simulado
+  **solo sin conexión abierta**, suscripción que responde 410/404 borrada, conductor y operadores (solo alertas
+  `CRITICA`) y un solo push con dos réplicas. `RealtimePushApagadoIT`: sin llaves VAPID, 503 y el WebSocket
+  igual.
+- `RealtimeSalaEsperaIT`: `OfferQueueUpdated` en `oferta:{id}:cupo`, `OfferQueueAdmitted` solo al admitido y
+  `OfferViewers` sumando este gateway y otra réplica simulada.
+- Contra Redis real sin Spring: `ReplayBufferIT`, `ConnectionPresenceIT`, `OfferViewersIT` (dos réplicas y
+  una que deja de reportar) y `PushSubscriptionsIT`.
 
 Toda la plataforma: ver el README de **API-gateway**.
 
@@ -426,10 +572,10 @@ Toda la plataforma: ver el README de **API-gateway**.
 `mvn verify` falla si la cobertura total baja de los mínimos del `pom.xml`, en **todas** las ramas
 (también en `main`, donde Sonar no corre):
 
-| Métrica | Medido (2026-11-02) | Mínimo |
+| Métrica | Medido (2026-11-04) | Mínimo |
 |---|---|---|
-| Líneas | 99,0 % | `jacoco.minimo.lineas` = 0.95 |
-| Ramas | 97,5 % | `jacoco.minimo.ramas` = 0.95 |
+| Líneas | 99,6 % | `jacoco.minimo.lineas` = 0.95 |
+| Ramas | 98,4 % | `jacoco.minimo.ramas` = 0.95 |
 
 **La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.** Corre `mvn verify`, mira
 el total en `target/site/jacoco/index.html` (o la tabla del CI), redondéalo hacia abajo al 5 % y

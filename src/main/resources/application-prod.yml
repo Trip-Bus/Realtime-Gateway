@@ -11,3 +11,6 @@ tripbus:
     # US-030: en PROD el JWT nunca viaja en la URL (logs, historial, proxies). ?token se ignora y el
     # cliente se autentica con {"type":"connect","token":...}. No subir a true en PROD.
     allow-query-token: ${WS_ALLOW_QUERY_TOKEN:false}
+
+  # JSON ECS por defecto en PROD (LOG_FORMAT=text para volver a texto).
+  log-format: ${LOG_FORMAT:json}

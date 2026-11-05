@@ -6,14 +6,17 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.tripbus.realtime.config.RealtimeProperties;
+import com.tripbus.realtime.config.TraceContexts;
 import com.tripbus.realtime.ws.ClientSession;
 import com.tripbus.realtime.ws.RealtimeHandler;
 import com.tripbus.realtime.ws.SessionRegistry;
 import com.tripbus.realtime.ws.Topics;
+import com.tripbus.realtime.ws.WsMetrics;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
@@ -78,6 +81,10 @@ public class EventFanout implements SmartLifecycle {
     private static final String OFFER_ALERT = "OfferAlert";
     private static final List<String> OFFER_ALERT_FIELDS = List.of(OFFER_ID, ITINERARY_ID, "origen", "destino",
             "precioOferta", "precioBase", "inicio", "fin", "salida");
+    /** Sala de espera (US-162): el pasajero ya puede comprar en la oferta; hasta cuándo y en qué turno. */
+    private static final String OFFER_QUEUE_ADMITTED = "OfferQueueAdmitted";
+    private static final List<String> OFFER_QUEUE_ADMITTED_FIELDS = List.of(OFFER_ID, ITINERARY_ID, "turno",
+            "admitidoEn", "expiraEn");
     private static final Set<String> REVOCATIONS = Set.of("SessionRevoked", "UserSuspended");
     private static final String QUOTA_UPDATED = "OfferQuotaUpdated";
     private static final String POSITION_UPDATED = "PositionUpdated";
@@ -88,28 +95,42 @@ public class EventFanout implements SmartLifecycle {
     private final ObjectMapper objectMapper;
     private final RealtimeProperties properties;
     private final Counter delivered;
-    private final Clock clock;
+    private final ReplayBuffer replay;
+    private final WsMetrics metrics;
+    private final TraceContexts tracing;
+    private final ObjectProvider<DomainEventListener> listeners;
+    private Clock clock = Clock.systemUTC();
     private final Throttle showcaseQuota = new Throttle(Duration.ofSeconds(1));
     private final Throttle fleetPositions = new Throttle(Duration.ofSeconds(3));
     private StreamMessageListenerContainer<String, MapRecord<String, String, String>> container;
     private volatile boolean running;
     private volatile String lastSeq = "0-0";
 
+    /**
+     * @param replay    búfer de reconexión (US-184): cada mensaje difundido se guarda, haya o no suscriptores
+     *                  en esta réplica (el cliente puede reconectar a otra)
+     * @param listeners los que reaccionan a cada evento además de la difusión (p. ej. el Web Push, US-185)
+     */
     @Autowired
     public EventFanout(RedisConnectionFactory connectionFactory, StringRedisTemplate redis, SessionRegistry registry,
-                       ObjectMapper objectMapper, RealtimeProperties properties, MeterRegistry meterRegistry) {
-        this(connectionFactory, redis, registry, objectMapper, properties, meterRegistry, Clock.systemUTC());
-    }
-
-    EventFanout(RedisConnectionFactory connectionFactory, StringRedisTemplate redis, SessionRegistry registry,
-                ObjectMapper objectMapper, RealtimeProperties properties, MeterRegistry meterRegistry, Clock clock) {
-        this.clock = clock;
+                       ObjectMapper objectMapper, RealtimeProperties properties, MeterRegistry meterRegistry,
+                       ReplayBuffer replay, WsMetrics metrics, TraceContexts tracing,
+                       ObjectProvider<DomainEventListener> listeners) {
         this.connectionFactory = connectionFactory;
         this.redis = redis;
         this.registry = registry;
         this.objectMapper = objectMapper;
         this.properties = properties;
         this.delivered = Counter.builder("tripbus.realtime.messages.delivered").register(meterRegistry);
+        this.replay = replay;
+        this.metrics = metrics;
+        this.tracing = tracing;
+        this.listeners = listeners;
+    }
+
+    /** Reloj de los límites de frecuencia (pruebas). */
+    void useClock(Clock clock) {
+        this.clock = clock;
     }
 
     @Override
@@ -158,7 +179,8 @@ public class EventFanout implements SmartLifecycle {
 
     void onEvent(MapRecord<String, String, String> record) {
         try {
-            fanOut(record);
+            // HT-10: la difusión continúa la traza del servicio que publicó el evento (campo traceparent).
+            tracing.run("tripbus.ws.difundir", record.getValue().get(TraceContexts.TRACEPARENT), () -> fanOut(record));
         } finally {
             lastSeq = record.getId().getValue();
         }
@@ -170,6 +192,7 @@ public class EventFanout implements SmartLifecycle {
         if (type == null) {
             return;
         }
+        String seq = record.getId().getValue();
         try {
             JsonNode payload = objectMapper.readTree(fields.getOrDefault("payload", "{}"));
             if (REVOCATIONS.contains(type)) {
@@ -182,28 +205,41 @@ public class EventFanout implements SmartLifecycle {
                 log.warn("Evento {} {} sin userId: no se difunde", type, fields.get("eventId"));
             }
             for (String topic : topics) {
-                Set<ClientSession> subscribers = registry.subscribers(topic);
                 // Un id que no es uuid (p. ej. userId mal formado) da un tópico que nadie puede seguir.
                 Topics.Parsed parsed = Topics.parse(topic);
-                if (subscribers.isEmpty() || parsed == null || throttled(parsed.kind(), type, topic, payload)) {
+                if (parsed == null || throttled(parsed.kind(), type, topic, payload)) {
                     continue;
                 }
                 ObjectNode out = objectMapper.createObjectNode();
                 out.put("type", "event");
                 out.put("topic", topic);
                 out.put("event", type);
-                out.put("seq", record.getId().getValue());
+                out.put("seq", seq);
                 out.put("eventId", fields.get("eventId"));
                 out.put("occurredAt", fields.get("occurredAt"));
                 out.set("data", data(parsed.kind(), type, payload));
                 String json = out.toString();
-                for (ClientSession session : subscribers) {
-                    deliver(session, json);
+                replay.append(topic, seq, json);
+                for (ClientSession session : registry.subscribers(topic)) {
+                    deliver(session, topic, parsed.kind(), seq, json);
                 }
             }
+            notifyListeners(type, seq, fields.get("eventId"), payload);
         } catch (Exception e) {
             log.warn("Evento {} no difundido: {}", type, e.getMessage());
         }
+    }
+
+    /** Un listener que falla no afecta la difusión ni a los demás listeners. */
+    private void notifyListeners(String type, String seq, String eventId, JsonNode payload) {
+        listeners.orderedStream().forEach(listener -> {
+            try {
+                listener.onEvent(type, seq, eventId, payload);
+            } catch (RuntimeException e) {
+                log.warn("Listener {} falló con el evento {} ({})", listener.getClass().getSimpleName(), type,
+                        e.getClass().getSimpleName());
+            }
+        });
     }
 
     /**
@@ -243,10 +279,11 @@ public class EventFanout implements SmartLifecycle {
     }
 
     /** Un fallo con un suscriptor nunca impide enviar al siguiente (US-031). */
-    private void deliver(ClientSession session, String json) {
+    private void deliver(ClientSession session, String topic, Topics.Kind kind, String seq, String json) {
         try {
-            if (session.send(json)) {
+            if (session.sendEvent(topic, seq, json)) {
                 delivered.increment();
+                metrics.sent(kind);
                 return;
             }
         } catch (RuntimeException e) {
@@ -264,12 +301,18 @@ public class EventFanout implements SmartLifecycle {
     static JsonNode data(Topics.Kind kind, String type, JsonNode payload) {
         return switch (kind) {
             case TIQUETES -> pick(payload, TICKET_NOTICE_FIELDS);
-            case AVISOS -> strip(pick(payload, OFFER_ALERT.equals(type) ? OFFER_ALERT_FIELDS : USER_NOTICE_FIELDS),
-                    PERSONAL_FIELDS, false);
+            case AVISOS -> strip(pick(payload, noticeFields(type)), PERSONAL_FIELDS, false);
             // El operador sí ve el motivo de un SOS.
             case VIAJE_CONDUCTOR, ALERTAS, FLOTA -> strip(payload.deepCopy(), PERSONAL_FIELDS, false);
             default -> sanitize(payload);
         };
+    }
+
+    private static List<String> noticeFields(String type) {
+        if (OFFER_ALERT.equals(type)) {
+            return OFFER_ALERT_FIELDS;
+        }
+        return OFFER_QUEUE_ADMITTED.equals(type) ? OFFER_QUEUE_ADMITTED_FIELDS : USER_NOTICE_FIELDS;
     }
 
     private static ObjectNode pick(JsonNode payload, List<String> allowed) {
