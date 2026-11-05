@@ -33,6 +33,13 @@ management:
     health:
       probes:
         enabled: true
+  # Trazas (HT-10): OTLP a OTEL_EXPORTER_OTLP_ENDPOINT (vacía = no se exporta; ObservabilityEnvironment).
+  # El traceparent W3C se propaga en las llamadas de snapshot y se retoma de los eventos del stream.
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING:0.1}
+    propagation:
+      type: w3c
   metrics:
     tags:
       application: realtime-gateway
@@ -68,3 +75,38 @@ tripbus:
     fleet-url: ${FLEET_URL:http://localhost:18005}
     # URL pública del API Gateway que usa la página de demostración.
     public-api-url: ${PUBLIC_API_URL:http://localhost:18000}
+    # HT-11: conexiones abiertas por IP y por usuario, contadas en Redis entre réplicas (por encima: 4429).
+    max-connections-per-ip: ${WS_MAX_CONNECTIONS_PER_IP:20}
+    max-connections-per-user: ${WS_MAX_CONNECTIONS_PER_USER:5}
+    # Mensajes del cliente por sesión: más de 30 en 10 s ⇒ RATE_LIMITED (sin cerrar).
+    max-client-messages: 30
+    client-message-window: 10s
+    # Vida de la marca de una conexión en Redis sin renovar (el heartbeat la renueva cada 20 s).
+    presence-ttl: 60s
+    # Header con la IP del cliente puesto por el proxy (se toma el último valor). Vacío: la IP de la conexión.
+    client-ip-header: ${WS_CLIENT_IP_HEADER:}
+    # US-184: búfer de reconexión por tópico en Redis.
+    replay:
+      size: 200
+      ttl: 10m
+    # US-163: cada cuánto se recalcula y difunde OfferViewers.
+    viewers-interval-ms: 5000
+
+  # US-185: Web Push. Sin las tres llaves VAPID, el push queda apagado y lo demás funciona igual.
+  push:
+    vapid-public-key: ${VAPID_PUBLIC_KEY:}
+    vapid-private-key: ${VAPID_PRIVATE_KEY:}
+    vapid-subject: ${VAPID_SUBJECT:}
+    max-subscriptions-per-user: 5
+
+  # Logs: LOG_FORMAT=json ⇒ JSON ECS en la consola (ObservabilityEnvironment). PROD lo trae en json.
+  log-format: ${LOG_FORMAT:text}
+
+logging:
+  pattern:
+    # Legible para humanos (IDE y QA), con el requestId y el traceId entre corchetes.
+    console: "%clr(%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}){faint} %clr(%5p) %clr([%X{requestId:-}]){magenta} %clr([%X{traceId:-}]){blue} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n%wEx"
+  structured:
+    ecs:
+      service:
+        name: realtime-gateway

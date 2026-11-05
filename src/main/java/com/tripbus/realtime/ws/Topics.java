@@ -103,12 +103,12 @@ public final class Topics {
             Kind.OFERTAS_ACTIVAS);
 
     /**
-     * Avisos al pasajero (US-033, US-183, US-140, US-153, US-161): se enrutan por el userId del payload
+     * Avisos al pasajero (US-033, US-183, US-140, US-153, US-161, US-162): se enrutan por el userId del payload
      * (WaitlistClosed, por su lista userIds); sin él no se difunden.
      */
     private static final Set<String> USER_NOTICES = Set.of("TicketIssued", "BookingAffected", "BookingRelocated",
             "RefundProcessed", "TicketRescheduled", "TicketUpdated", "WaitlistSeatOffered", "WaitlistClosed",
-            "OfferAlert", "TicketNoShow");
+            "OfferAlert", "TicketNoShow", "OfferQueueAdmitted");
 
     private Topics() {
     }
@@ -204,6 +204,8 @@ public final class Topics {
             case "OfferQuotaUpdated", "OfferClosed", "OfferSoldOut", "OfferActivated" ->
                     concat(single("oferta:", payload, "offerId", ":cupo"), List.of(OFERTAS_ACTIVAS));
             case "OfferCreated", "OfferUpdated" -> List.of(OFERTAS_ACTIVAS);
+            // Sala de espera (US-162): el estado de la fila solo va al cupo de la oferta, no a la vitrina.
+            case "OfferQueueUpdated" -> single("oferta:", payload, "offerId", ":cupo");
             // El SOS nunca va a la línea de tiempo pública (fleet no lo publica; aquí, por defensa).
             case "TripEventReported" -> "SOS".equals(payload.path("tipo").asText())
                     ? List.of() : single(VIAJE, payload, ITINERARY_ID, TO_EVENTOS);
@@ -227,7 +229,8 @@ public final class Topics {
                     single(USUARIO, payload, USER_ID, ":tiquetes"),
                     single(USUARIO, payload, USER_ID, TO_AVISOS));
             case "BookingAffected", "BookingRelocated", "RefundProcessed", "TicketRescheduled", "TicketUpdated",
-                 "WaitlistSeatOffered", "OfferAlert", "TicketNoShow" -> single(USUARIO, payload, USER_ID, TO_AVISOS);
+                 "WaitlistSeatOffered", "OfferAlert", "TicketNoShow", "OfferQueueAdmitted" ->
+                    single(USUARIO, payload, USER_ID, TO_AVISOS);
             // Un cierre de la fila avisa a cada turno cancelado (userIds).
             case "WaitlistClosed" -> each(USUARIO, payload.path("userIds"), TO_AVISOS);
             case "DriverAssigned", "DriverUnassigned" -> single(CONDUCTOR, payload, CONDUCTOR_ID, TO_VIAJE);

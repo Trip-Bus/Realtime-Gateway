@@ -1,8 +1,11 @@
 package com.tripbus.realtime.ws;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tripbus.realtime.config.RealtimeLimits;
 import com.tripbus.realtime.config.RealtimeProperties;
+import com.tripbus.realtime.config.TraceContexts;
 import com.tripbus.realtime.events.EventFanout;
+import com.tripbus.realtime.events.ReplayBuffer;
 import com.tripbus.realtime.snapshot.SnapshotService;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
@@ -37,10 +40,19 @@ class RealtimeHandlerTest {
     private final SessionRegistry registry = new SessionRegistry(new SimpleMeterRegistry());
     private final TokenRevocations revocations = mock(TokenRevocations.class);
     private final JwtDecoder jwtDecoder = mock(JwtDecoder.class);
-    private final RealtimeHandler handler = new RealtimeHandler(registry, mock(SnapshotService.class),
-            jwtDecoder, new ObjectMapper(), new RealtimeProperties(null, null, null, null,
-                    Duration.ofSeconds(45), Duration.ofSeconds(10), 0, 0, 0, null, null, null, null, false),
-            revocations, mock(EventFanout.class));
+    private final ConnectionPresence presence = mock(ConnectionPresence.class);
+    private final RealtimeHandler handler = newHandler(registry, revocations, jwtDecoder, presence);
+
+    static RealtimeHandler newHandler(SessionRegistry registry, TokenRevocations revocations, JwtDecoder jwtDecoder,
+                                      ConnectionPresence presence) {
+        when(presence.acquireIp(any())).thenReturn(true);
+        when(presence.acquireUser(any(), anyString())).thenReturn(true);
+        return new RealtimeHandler(registry, mock(SnapshotService.class),
+                jwtDecoder, new ObjectMapper(), new RealtimeProperties(null, null, null, null,
+                        Duration.ofSeconds(45), Duration.ofSeconds(10), 0, 0, 0, null, null, null, null, false),
+                revocations, mock(EventFanout.class), RealtimeLimits.defaults(), presence,
+                mock(ReplayBuffer.class), new WsMetrics(new SimpleMeterRegistry(), registry), TraceContexts.noop());
+    }
 
     private static WebSocketSession raw(String id) {
         WebSocketSession raw = mock(WebSocketSession.class);

@@ -4,3 +4,6 @@ tripbus:
   realtime:
     # Stream aparte para no mezclar eventos de prueba con los de QA.
     events-stream: tripbus:events:realtime-test
+    # US-163: OfferViewers solo cuando la prueba lo pide (RealtimeSalaEsperaIT lo baja a 200 ms); así no se
+    # cuela un OfferViewers entre los eventos que esperan las demás pruebas de oferta:{id}:cupo.
+    viewers-interval-ms: 3600000
