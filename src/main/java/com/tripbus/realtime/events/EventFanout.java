@@ -85,7 +85,7 @@ public class EventFanout implements SmartLifecycle {
     private static final String OFFER_QUEUE_ADMITTED = "OfferQueueAdmitted";
     private static final List<String> OFFER_QUEUE_ADMITTED_FIELDS = List.of(OFFER_ID, ITINERARY_ID, "turno",
             "admitidoEn", "expiraEn");
-    private static final Set<String> REVOCATIONS = Set.of("SessionRevoked", "UserSuspended");
+    private static final Set<String> REVOCATIONS = Set.of("SessionRevoked", "UserSuspended", "UserDeleted");
     private static final String QUOTA_UPDATED = "OfferQuotaUpdated";
     private static final String POSITION_UPDATED = "PositionUpdated";
 
@@ -257,9 +257,9 @@ public class EventFanout implements SmartLifecycle {
     }
 
     /**
-     * Logout o suspensión publicados por identity (US-006): cierra con 4401 las sesiones de ese token
-     * (SessionRevoked, por jti) o de ese usuario (UserSuspended, por userId). No se reenvían a ningún
-     * tema y las sesiones anónimas no se tocan.
+     * Logout, suspensión o eliminación de la cuenta publicados por identity (US-006, US-104, US-131): cierra
+     * con 4401 las sesiones de ese token (SessionRevoked, por jti) o de ese usuario (UserSuspended y
+     * UserDeleted, por userId). No se reenvían a ningún tema y las sesiones anónimas no se tocan.
      */
     private void revoke(String type, JsonNode payload) {
         boolean byToken = "SessionRevoked".equals(type);

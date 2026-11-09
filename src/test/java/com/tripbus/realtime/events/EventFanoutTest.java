@@ -376,6 +376,18 @@ class EventFanoutTest {
     }
 
     @Test
+    void userDeletedCierraTodasLasSesionesDelUsuarioEliminado() {
+        authenticated("a", "u1", "j1");
+        authenticated("b", "u1", "j2");
+        ClientSession other = authenticated("c", "u2", "j3");
+
+        fanout.onEvent(record("350-0", "UserDeleted", "{\"userId\":\"u1\"}"));
+
+        assertThat(registry.all()).containsExactly(other);
+        assertThat(delivered()).isZero();
+    }
+
+    @Test
     void revocacionSinIdentificadorNoCierraNada() {
         authenticated("a", "u1", "j1");
 

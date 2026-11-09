@@ -201,8 +201,9 @@ permitido) el gateway consulta `tripbus:revoked:{jti}` en Redis (la escribe iden
 con TTL); si existe ⇒ `{"type":"error","code":"UNAUTHENTICATED"}` y cierre 4401. Si Redis no responde
 se permite la conexión con un WARN en el log (la expiración del token sigue protegiendo). Con la
 sesión abierta, el evento `SessionRevoked {jti, userId}` cierra con 4401 las conexiones de ese `jti`
-(las de otros tokens del mismo usuario siguen abiertas) y `UserSuspended {userId}` todas las de ese
-usuario. Estos eventos no se reenvían a ningún tema y no afectan a las sesiones anónimas.
+(las de otros tokens del mismo usuario siguen abiertas) y `UserSuspended {userId}` o `UserDeleted {userId}`
+(US-131, cuenta eliminada) todas las de ese usuario. Estos eventos no se reenvían a ningún tema y no afectan a
+las sesiones anónimas.
 
 **Cuentas suspendidas (US-104):** en la misma autenticación (`connect` o `?token=`), después del
 `jti`, el gateway consulta `tripbus:suspended:{sub}` en Redis (la escribe identity al suspender la
