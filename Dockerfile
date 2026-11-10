@@ -8,7 +8,8 @@ RUN mvn -B -q package -DskipTests
 
 # ---- Etapa 2: imagen de ejecución (solo JRE) ----
 FROM eclipse-temurin:21-jre-alpine
-RUN addgroup -S tripbus && adduser -S tripbus -G tripbus
+# Parches de seguridad de alpine que la imagen base aún no trae (p. ej. brotli-libs, CVE-2026-111497).
+RUN apk upgrade --no-cache && addgroup -S tripbus && adduser -S tripbus -G tripbus
 WORKDIR /app
 COPY --from=build /app/target/*.jar app.jar
 USER tripbus

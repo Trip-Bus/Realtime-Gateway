@@ -30,7 +30,7 @@ class HandshakeAuthInterceptorTest {
     private final Map<String, Object> attributes = new HashMap<>();
 
     private static RealtimeProperties properties(boolean allowQueryToken) {
-        return new RealtimeProperties(null, null, null, null, null, null, 0, 0, null, null, null, null, allowQueryToken);
+        return new RealtimeProperties(null, null, null, null, null, null, 0, 0, 0, null, null, null, null, allowQueryToken);
     }
 
     private boolean handshake(boolean allowQueryToken, String query) {

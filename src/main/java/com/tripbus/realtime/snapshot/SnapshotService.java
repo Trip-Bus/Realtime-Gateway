@@ -6,6 +6,7 @@ import com.tripbus.realtime.config.RequestIdPropagationInterceptor;
 import com.tripbus.realtime.ws.Topics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
@@ -24,16 +25,25 @@ public class SnapshotService {
     private final RestClient fleet;
 
     public SnapshotService(RealtimeProperties properties) {
-        this.seatInventory = client(properties.seatInventoryUrl());
-        this.flashOffers = client(properties.flashOffersUrl());
-        this.fleet = client(properties.fleetUrl());
+        this(properties, RestClient.builder());
     }
 
-    private static RestClient client(String baseUrl) {
+    /**
+     * builder: el de Spring Boot, con observaciones (HT-10): cada llamada es un span hijo del snapshot y lleva
+     * el header traceparent al servicio dueño del dato.
+     */
+    @Autowired
+    public SnapshotService(RealtimeProperties properties, RestClient.Builder builder) {
+        this.seatInventory = client(builder, properties.seatInventoryUrl());
+        this.flashOffers = client(builder, properties.flashOffersUrl());
+        this.fleet = client(builder, properties.fleetUrl());
+    }
+
+    private static RestClient client(RestClient.Builder builder, String baseUrl) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(1000);
         factory.setReadTimeout(3000);
-        return RestClient.builder()
+        return builder.clone()
                 .baseUrl(baseUrl)
                 .requestFactory(factory)
                 .requestInterceptor(new RequestIdPropagationInterceptor())
@@ -48,14 +58,19 @@ public class SnapshotService {
                 case CUPO -> flashOffers.get().uri("/offers/{id}/quota", topic.id()).retrieve().body(JsonNode.class);
                 case EVENTOS -> fleet.get().uri("/trips/{id}/timeline", topic.id()).retrieve().body(JsonNode.class);
                 case POSICION -> fleet.get().uri("/buses/{id}/position", topic.id()).retrieve().body(JsonNode.class);
+                // Posición, estado, paradas, estadoRastreo y ultimaPosicionEn del bus del itinerario.
+                case POSICION_VIAJE -> fleet.get().uri("/itineraries/{id}/bus-position", topic.id()).retrieve().body(JsonNode.class);
+                // Vitrina (US-160): la primera página, con el orden y tamaño por defecto de flash-offers.
+                case OFERTAS_ACTIVAS -> flashOffers.get().uri("/offers/showcase").retrieve().body(JsonNode.class);
                 // Sin snapshot (Kind.hasSnapshot): RealtimeHandler no lo pide.
-                case TIQUETES -> com.fasterxml.jackson.databind.node.NullNode.getInstance();
+                case TIQUETES, AVISOS, VIAJE_CONDUCTOR, ALERTAS, FLOTA -> com.fasterxml.jackson.databind.node.NullNode.getInstance();
             };
             return Optional.ofNullable(data);
         } catch (HttpClientErrorException.NotFound e) {
             return Optional.of(com.fasterxml.jackson.databind.node.NullNode.getInstance());
         } catch (RuntimeException e) {
-            log.warn("No se pudo obtener el snapshot de {}:{} — {}", topic.kind(), topic.id(), e.getMessage());
+            log.warn("No se pudo obtener el snapshot de {}{} — {}", topic.kind(),
+                    topic.id() == null ? "" : ":" + topic.id(), e.getMessage());
             return Optional.empty();
         }
     }

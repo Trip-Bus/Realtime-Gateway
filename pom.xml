@@ -26,17 +26,25 @@
         <netty.version>4.1.137.Final</netty.version>
         <tomcat.version>10.1.60</tomcat.version>
 
-        <logstash-logback.version>8.0</logstash-logback.version>
+        <!-- Web Push (US-185): nl.martijndwars:web-push (MIT). Sus dependencias se fijan a versiones
+             sin CVE conocidos: jose4j (firma VAPID), BouncyCastle (cifrado aes128gcm) y el cliente HTTP. -->
+        <web-push.version>5.1.2</web-push.version>
+        <jose4j.version>0.9.7</jose4j.version>
+        <bouncycastle.version>1.86</bouncycastle.version>
+        <httpasyncclient.version>4.1.5</httpasyncclient.version>
+        <httpclient4.version>4.5.14</httpclient4.version>
+        <httpcore4.version>4.4.16</httpcore4.version>
         <jacoco.version>0.8.12</jacoco.version>
         <sonar-maven-plugin.version>5.8.0.7211</sonar-maven-plugin.version>
 
         <!-- Mínimos de cobertura total que exige jacoco:check (ver jacoco-maven-plugin).
              La cobertura nunca puede bajar: si agregas pruebas, sube el mínimo.
-             Fijados con la medición del 2026-10-12 (US-006) redondeada hacia abajo al 5 %: líneas 88,3 % -> 0.85;
-             ramas 88,7 % -> 0.85. El heartbeat programado ya corre siempre (RealtimeSinQueryTokenIT y
-             RealtimePublicoIT lo programan cada 200 ms), así que la medición varía menos entre corridas. -->
-        <jacoco.minimo.lineas>0.85</jacoco.minimo.lineas>
-        <jacoco.minimo.ramas>0.85</jacoco.minimo.ramas>
+             Fijados con la medición del 2026-11-04 (Sprints 5 y 6: reconexión, límites, push y personas mirando)
+             redondeada hacia abajo al 5 %: líneas 99,6 % -> 0.95; ramas 98,4 % -> 0.95. El heartbeat programado ya corre
+             siempre (RealtimeSinQueryTokenIT, RealtimePublicoIT y RealtimeCambioContrasenaIT lo programan cada
+             200 ms), así que la medición varía menos entre corridas. -->
+        <jacoco.minimo.lineas>0.95</jacoco.minimo.lineas>
+        <jacoco.minimo.ramas>0.95</jacoco.minimo.ramas>
 
         <!-- SonarQube Cloud: el análisis lo lanza el CI solo en develop (push y PR con base develop)
              cuando existe el secreto SONAR_TOKEN. El plan Free analiza una única rama. -->
@@ -81,11 +89,84 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
 
-        <!-- Logs en JSON en PROD (logback-spring.xml). -->
+        <!-- Trazas (HT-10): puente Micrometer -> OpenTelemetry y exportador OTLP (versiones de Spring Boot).
+             Sin OTEL_EXPORTER_OTLP_ENDPOINT no se exporta nada (ObservabilityEnvironment). -->
         <dependency>
-            <groupId>net.logstash.logback</groupId>
-            <artifactId>logstash-logback-encoder</artifactId>
-            <version>${logstash-logback.version}</version>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-otel</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
+        </dependency>
+
+        <!-- Web Push (US-185). Solo se usa PushService (Apache HttpAsyncClient): se excluyen el cliente
+             alterno (async-http-client) y la CLI (jcommander); jose4j y httpasyncclient se declaran abajo
+             con versiones parcheadas. commons-logging lo provee spring-jcl. -->
+        <dependency>
+            <groupId>nl.martijndwars</groupId>
+            <artifactId>web-push</artifactId>
+            <version>${web-push.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.asynchttpclient</groupId>
+                    <artifactId>async-http-client</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.beust</groupId>
+                    <artifactId>jcommander</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.bitbucket.b_c</groupId>
+                    <artifactId>jose4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.httpcomponents</groupId>
+                    <artifactId>httpasyncclient</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.bitbucket.b_c</groupId>
+            <artifactId>jose4j</artifactId>
+            <version>${jose4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpasyncclient</artifactId>
+            <version>${httpasyncclient.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>commons-logging</groupId>
+                    <artifactId>commons-logging</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpclient</artifactId>
+            <version>${httpclient4.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>commons-logging</groupId>
+                    <artifactId>commons-logging</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpcore</artifactId>
+            <version>${httpcore4.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpcore-nio</artifactId>
+            <version>${httpcore4.version}</version>
         </dependency>
 
         <dependency>
